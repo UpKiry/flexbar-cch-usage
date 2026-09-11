@@ -1,1 +1,6 @@
-{}
+{
+  "cchUrl": "",
+  "apiKey": "",
+  "refreshIntervalSeconds": 60,
+  "dateRangeDays": 7
+}

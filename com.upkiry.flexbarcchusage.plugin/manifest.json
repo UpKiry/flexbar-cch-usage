@@ -1,74 +1,35 @@
 {
-    "name": "flexbar-cch-usage",
-    "uuid": "com.upkiry.flexbarcchusage",
-    "version": "1.0.0",
-    "author": "Upkiry",
-    "entry": "backend/plugin.cjs",
-    "description": "",
-    "repo": "",
-    "sdk": {
-        "version": "1.0.7"
+  "name": "flexbar-cch-usage",
+  "uuid": "com.upkiry.flexbarcchusage",
+  "version": "1.1.1",
+  "author": "Upkiry",
+  "entry": "backend/plugin.cjs",
+  "description": "在 Flexbar 上实时查看 Claude Code Hub 用量",
+  "repo": "",
+  "sdk": { "version": "1.0.7" },
+  "software": { "minimumVersion": "1.3.0" },
+  "os": [
+    { "platform": "mac", "minimumVersion": "10.15" },
+    { "platform": "windows", "minimumVersion": "10" }
+  ],
+  "device": [{ "name": "flexbar", "version": "1.0.0" }],
+  "configPage": "configPage",
+  "keyLibrary": {
+    "title": "$PluginName",
+    "style": { "icon": "mdi mdi-chart-box-outline" },
+    "children": [
+      { "title": "用量总览", "tip": "查看今日用量摘要", "cid": "com.upkiry.flexbarcchusage.overview", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-view-dashboard-outline", "width": 180 }, "data": { "query": "overview" } },
+      { "title": "5小时配额", "tip": "查看当前 5 小时配额", "cid": "com.upkiry.flexbarcchusage.quota", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-gauge", "width": 180 }, "data": { "query": "quota" } },
+      { "title": "今日用量", "tip": "查看今日调用和成本", "cid": "com.upkiry.flexbarcchusage.today", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-calendar-today", "width": 180 }, "data": { "query": "today" } },
+      { "title": "近期用量", "tip": "查看最近几天汇总", "cid": "com.upkiry.flexbarcchusage.range", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-calendar-range", "width": 180 }, "data": { "query": "range" } }
+    ]
+  },
+  "local": {
+    "zh-CN": {
+      "PluginName": "CC Hub 用量"
     },
-    "software": {
-        "minimumVersion": "1.3.0"
-    },
-    "os": [
-        {
-            "platform": "mac",
-            "minimumVersion": "10.15"
-        },
-        {
-            "platform": "windows",
-            "minimumVersion": "10"
-        }
-    ],
-    "device": [
-        {
-            "name": "flexbar",
-            "version": "1.0.0"
-        }
-    ],
-    "configPage": "",
-    "keyLibrary": {
-        "title": "$PluginName",
-        "style": {
-            "icon": "mdi mdi-puzzle"
-        },
-        "children": [
-          {
-              "title": "$Counter.Title",
-              "tip": "$Counter.Tip",
-              "cid": "com.upkiry.flexbarcchusage.counter",
-              "config": {
-                  "keyType": "default",
-                  "clickable": true,
-                  "platform": [
-                      "windows",
-                      "mac"
-                  ]
-              },
-              "style": {
-                  "icon": "mdi mdi-gesture-tap-button",
-                  "width": 240
-              },
-              "data": {
-                  "rangeMin": "0",
-                  "rangeMax": "100"
-              }
-          }
-        ]
-    },
-    "local": {
-        "en": {
-            "PluginName": "flexbar-cch-usage",
-            "Counter": {
-                "Title": "Tap Counter",
-                "Tip": "Default keys with customizable drawable content",
-                "UI": {
-                    "RangeMin": "Minimum Value",
-                    "RangeMax": "Maximum Value"
-                }
-            }
-        }
+    "en": {
+      "PluginName": "CC Hub Usage"
     }
+  }
 }
