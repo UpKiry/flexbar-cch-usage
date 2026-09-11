@@ -3,4 +3,9 @@ logs
 .vscode
 .env
 package-lock.json
-com.upkiry.flexbarcchusage.plugin/backend
+/com.upkiry.flexbarcchusage.plugin/backend/*
+!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/
+!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/
+!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-darwin-arm64/
+!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-darwin-arm64/package.json
+!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-darwin-arm64/skia.darwin-arm64.node

@@ -18,10 +18,10 @@
     "title": "$PluginName",
     "style": { "icon": "mdi mdi-chart-box-outline" },
     "children": [
-      { "title": "用量总览", "tip": "查看今日用量摘要", "cid": "com.upkiry.flexbarcchusage.overview", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-view-dashboard-outline", "width": 180 }, "data": { "query": "overview" } },
-      { "title": "5小时配额", "tip": "查看当前 5 小时配额", "cid": "com.upkiry.flexbarcchusage.quota", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-gauge", "width": 180 }, "data": { "query": "quota" } },
-      { "title": "今日用量", "tip": "查看今日调用和成本", "cid": "com.upkiry.flexbarcchusage.today", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-calendar-today", "width": 180 }, "data": { "query": "today" } },
-      { "title": "近期用量", "tip": "查看最近几天汇总", "cid": "com.upkiry.flexbarcchusage.range", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-calendar-range", "width": 180 }, "data": { "query": "range" } }
+      { "title": "用量总览", "tip": "查看今日用量摘要", "cid": "com.upkiry.flexbarcchusage.overview", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-view-dashboard-outline", "width": 240 }, "data": { "query": "overview" } },
+      { "title": "5小时配额", "tip": "查看当前 5 小时配额", "cid": "com.upkiry.flexbarcchusage.quota", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-gauge", "width": 240 }, "data": { "query": "quota" } },
+      { "title": "今日用量", "tip": "查看今日调用和成本", "cid": "com.upkiry.flexbarcchusage.today", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-calendar-today", "width": 240 }, "data": { "query": "today" } },
+      { "title": "近期用量", "tip": "查看最近几天汇总", "cid": "com.upkiry.flexbarcchusage.range", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-calendar-range", "width": 240 }, "data": { "query": "range" } }
     ]
   },
   "local": {

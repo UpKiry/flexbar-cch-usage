@@ -1,6 +1,6 @@
 # Flexbar CC Hub 用量插件
 
-这是一个用于 Flexbar/FlexDesigner 的 Claude Code Hub 用量仪表盘插件。它通过 CC Hub 的登录 API 获取配额、今日用量和日期汇总，并在 Flexbar 上显示四个固定按键：
+这是一个用于 Flexbar/FlexDesigner 的 Claude Code Hub 用量仪表盘插件。它通过 CC Hub 的登录 API 获取配额、今日用量和日期汇总，并在 Flexbar 上显示四个固定按键。按键使用插件自绘 PNG 和内嵌 CJK 字体，避免原生标题布局重叠或中文缺字：
 
 当前版本：`1.1.1`
 
@@ -24,7 +24,7 @@ API Key 只保存在 FlexDesigner 配置中，不会写入按键数据或日志�
 
 ## 开发
 
-环境要求：Node.js 18+、FlexDesigner 1.3+、Flexbar。
+环境要求：Node.js 18+、FlexDesigner 1.3+、Flexbar。自绘渲染使用 `@napi-rs/canvas`，按键目标尺寸为 240×60；设备返回 180px 宽度时自动使用紧凑布局。
 
 ~~~bash
 npm install
