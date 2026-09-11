@@ -1,5 +1,6 @@
 const { plugin, logger } = require("@eniac/flexdesigner");
 const { DEFAULTS, localDate, number, textNumber, money, compactMoney, normalizedConfig } = require("./core");
+const { WIDTH: RENDER_WIDTH, renderKey } = require("./render");
 
 const KEY_CIDS = new Set([
   "com.upkiry.flexbarcchusage.overview",
@@ -8,6 +9,7 @@ const KEY_CIDS = new Set([
   "com.upkiry.flexbarcchusage.range",
 ]);
 const keysByDevice = new Map();
+const renderedFingerprints = new Map();
 let config = {};
 let client;
 let cache = { quota: null, today: null, summary: null, fetchedAt: null, stale: true, error: null };
@@ -97,19 +99,36 @@ function keyView(cid, state = cache) {
   if (cid.endsWith("today")) return `今日 ${textNumber(state.today?.calls)}次 ${compactMoney(state.today?.costUsd, state.today?.currencyCode)}${suffix}`;
   return `近${config.dateRangeDays}天 ${textNumber(state.summary?.totalRequests)}次 ${compactMoney(state.summary?.totalCost, state.summary?.currencyCode)}${suffix}`;
 }
-function drawKey(serialNumber, key) {
-  if (!key || !KEY_CIDS.has(key.cid)) return;
-  key.style = { ...(key.style || {}), showTitle: true, showIcon: true };
-  if (key.cid.endsWith("quota")) {
-    const current = number(cache.quota?.keyCurrent5hUsd);
-    const limit = number(cache.quota?.keyLimit5hUsd);
-    const percent = current !== null && limit > 0 ? current / limit * 100 : 0;
-    key.style.icon = percent >= 95 ? "mdi mdi-alert-circle" : percent >= 80 ? "mdi mdi-alert" : "mdi mdi-gauge";
-  }
+function prepareKey(serialNumber, key) {
+  if (!key || !KEY_CIDS.has(key.cid)) return null;
+  const width = Number(key.width || key.style?.width || RENDER_WIDTH);
+  const rendered = renderKey(key.cid, cache, config, width);
+  const fingerprintKey = `${serialNumber}:${key.uid}`;
+  if (renderedFingerprints.get(fingerprintKey) === rendered.fingerprint) return null;
+  key.style = { ...(key.style || {}), width: rendered.width, showTitle: false, showIcon: false, showImage: false };
   key.title = keyView(key.cid);
-  plugin.draw(serialNumber, key, "draw").catch((error) => logger.error("更新 Flexbar 按键失败", error));
+  return { serialNumber, key, image: rendered.dataUrl, fingerprintKey, fingerprint: rendered.fingerprint };
 }
-function drawAll() { for (const [serial, keys] of keysByDevice) for (const key of keys.values()) drawKey(serial, key); }
+function sendDraws(updates) {
+  return Promise.all(updates.map(({ serialNumber, key, image, fingerprintKey, fingerprint }) =>
+    plugin.draw(serialNumber, key, "base64", image)
+      .then(() => renderedFingerprints.set(fingerprintKey, fingerprint))
+      .catch((error) => logger.error("更新 Flexbar 按键失败", error))));
+}
+function drawKey(serialNumber, key) {
+  const update = prepareKey(serialNumber, key);
+  return update ? sendDraws([update]) : Promise.resolve([]);
+}
+function drawAll() {
+  const updates = [];
+  for (const [serial, keys] of keysByDevice) {
+    for (const key of keys.values()) {
+      const update = prepareKey(serial, key);
+      if (update) updates.push(update);
+    }
+  }
+  return sendDraws(updates);
+}
 async function readStoredConfig() {
   let lastError;
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -161,6 +180,7 @@ function restartTimer() {
 
 plugin.on("plugin.alive", async (payload) => {
   const serial = payload?.serialNumber; if (!serial) return;
+  for (const key of renderedFingerprints.keys()) if (key.startsWith(`${serial}:`)) renderedFingerprints.delete(key);
   const keys = new Map();
   for (const key of payload.keys || []) if (KEY_CIDS.has(key.cid)) keys.set(key.uid, key);
   keysByDevice.set(serial, keys);
@@ -176,6 +196,7 @@ plugin.on("plugin.data", async (payload) => {
 plugin.on("plugin.config.updated", async (payload) => {
   const storedConfig = payload?.config || payload?.data?.config;
   client = null; cache = { quota: null, today: null, summary: null, fetchedAt: null, stale: true, error: null };
+  renderedFingerprints.clear();
   await refresh("配置更新", storedConfig); restartTimer();
 });
 plugin.on("device.status", (devices) => {
