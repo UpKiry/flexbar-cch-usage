@@ -6,6 +6,7 @@ const {
   money,
   compactMoney,
   normalizedConfig,
+  normalizeUsageRange,
 } = require("../src/core");
 
 test("normalizes defaults, aliases, URL slashes and numeric bounds", () => {
@@ -13,18 +14,15 @@ test("normalizes defaults, aliases, URL slashes and numeric bounds", () => {
     cchUrl: "",
     apiKey: "",
     refreshIntervalSeconds: 60,
-    dateRangeDays: 7,
   });
   assert.deepEqual(normalizedConfig({
     CCH_URL: " https://hub.example/// ",
     CCH_API_KEY: " key ",
     refreshIntervalSeconds: 1,
-    dateRangeDays: 100,
   }), {
     cchUrl: "https://hub.example",
     apiKey: "key",
     refreshIntervalSeconds: 15,
-    dateRangeDays: 90,
   });
 });
 
@@ -39,4 +37,10 @@ test("formats finite values and safe fallbacks", () => {
 
 test("calculates Shanghai calendar dates deterministically", () => {
   assert.equal(localDate(new Date("2026-09-11T00:00:00.000Z")), "2026-09-11");
+});
+
+test("normalizes per-key usage ranges", () => {
+  assert.equal(normalizeUsageRange("5h"), "5h");
+  assert.equal(normalizeUsageRange("1m"), "1m");
+  assert.equal(normalizeUsageRange("invalid"), "1d");
 });

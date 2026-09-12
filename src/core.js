@@ -1,4 +1,5 @@
-const DEFAULTS = { refreshIntervalSeconds: 60, dateRangeDays: 7 };
+const USAGE_RANGES = ["5h", "1d", "7d", "1m"];
+const DEFAULTS = { refreshIntervalSeconds: 60, usageRange: "1d" };
 
 function localDate(date = new Date()) {
   return new Intl.DateTimeFormat("sv-SE", {
@@ -28,31 +29,33 @@ function compactMoney(value, currency = "USD") {
   return currency === "USD" || !currency ? `$${value.toFixed(2)}` : `${value.toFixed(2)} ${currency}`;
 }
 
+function normalizeUsageRange(value, fallback = DEFAULTS.usageRange) {
+  return USAGE_RANGES.includes(value) ? value : fallback;
+}
+
 function safeConfigValue(value, fallback = "") {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
 function normalizedConfig(value = {}) {
   const interval = Number(value.refreshIntervalSeconds);
-  const days = Number(value.dateRangeDays);
   return {
     cchUrl: safeConfigValue(value.cchUrl || value.CCH_URL).replace(/\/+$/, ""),
     apiKey: safeConfigValue(value.apiKey || value.CCH_API_KEY),
     refreshIntervalSeconds: Number.isFinite(interval)
       ? Math.max(15, Math.min(3600, Math.round(interval)))
       : DEFAULTS.refreshIntervalSeconds,
-    dateRangeDays: Number.isFinite(days)
-      ? Math.max(1, Math.min(90, Math.round(days)))
-      : DEFAULTS.dateRangeDays,
   };
 }
 
 module.exports = {
   DEFAULTS,
+  USAGE_RANGES,
   localDate,
   number,
   textNumber,
   money,
   compactMoney,
+  normalizeUsageRange,
   normalizedConfig,
 };

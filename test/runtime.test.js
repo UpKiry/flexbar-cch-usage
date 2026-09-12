@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createPluginRuntime } = require("../src/runtime");
 
-const IDS = ["overview", "quota", "today", "range"];
+const IDS = ["quota", "usage"];
 const cid = (name) => `com.upkiry.flexbarcchusage.${name}`;
 
 function makePlugin(config) {
@@ -27,17 +27,20 @@ function renderKeyFn(keyCid, state, config, width) {
 }
 
 function keys() {
-  return IDS.map((name, index) => ({ cid: cid(name), uid: `key-${index}`, width: 240, style: {} }));
+  return IDS.map((name, index) => ({
+    cid: cid(name), uid: `key-${index}`, width: 240, style: {},
+    data: name === "usage" ? { range: "1d" } : { query: name },
+  }));
 }
 
 test("registers FlexDesigner events, isolates devices, and deduplicates draws", async () => {
-  const plugin = makePlugin({ cchUrl: "https://hub.example", apiKey: "secret", refreshIntervalSeconds: 15, dateRangeDays: 7 });
+  const plugin = makePlugin({ cchUrl: "https://hub.example", apiKey: "secret", refreshIntervalSeconds: 15 });
   const logs = { errors: [], warns: [] };
   let loads = 0;
   class FakeClient {
     async load() {
       loads += 1;
-      return { quota: {}, today: { calls: 12, costUsd: 1 }, summary: { totalRequests: 12, totalCost: 1 } };
+      return { quota: {}, today: { calls: 12, costUsd: 1 }, summaries: {} };
     }
   }
   const runtime = createPluginRuntime({
@@ -54,8 +57,8 @@ test("registers FlexDesigner events, isolates devices, and deduplicates draws", 
   await plugin.handlers.get("plugin.alive")({ serialNumber: "B", keys: keys() });
   assert.equal(loads, 2);
   assert.equal(runtime.getState().deviceCount, 2);
-  assert.equal(plugin.draws.filter((draw) => draw.serial === "A").length, 8);
-  assert.equal(plugin.draws.filter((draw) => draw.serial === "B").length, 4);
+  assert.equal(plugin.draws.filter((draw) => draw.serial === "A").length, 4);
+  assert.equal(plugin.draws.filter((draw) => draw.serial === "B").length, 2);
   const before = plugin.draws.length;
   await plugin.handlers.get("plugin.data")({ data: { key: keys()[0] } });
   assert.equal(plugin.draws.length, before);
@@ -65,9 +68,39 @@ test("registers FlexDesigner events, isolates devices, and deduplicates draws", 
   runtime.stop();
 });
 
+test("requests the union of configured usage ranges", async () => {
+  const plugin = makePlugin({ cchUrl: "https://hub.example", apiKey: "secret", refreshIntervalSeconds: 15 });
+  const requested = [];
+  class FakeClient {
+    async load(ranges) {
+      requested.push(ranges);
+      return {
+        quota: { keyCurrent5hUsd: 1 },
+        summaries: { "7d": { totalRequests: 7, totalCost: 2 }, "1m": { totalRequests: 30, totalCost: 3 } },
+      };
+    }
+  }
+  const runtime = createPluginRuntime({
+    plugin,
+    logger: { error: () => {}, warn: () => {} },
+    HubClientClass: FakeClient,
+    renderKeyFn,
+    setIntervalFn: () => ({}),
+    clearIntervalFn: () => {},
+  });
+  const configuredKeys = [
+    { cid: cid("quota"), uid: "quota", width: 240, style: {}, data: {} },
+    { cid: cid("usage"), uid: "usage-7d", width: 240, style: {}, data: { range: "7d" } },
+    { cid: cid("usage"), uid: "usage-1m", width: 240, style: {}, data: { range: "1m" } },
+  ];
+  await runtime.handlers.alive({ serialNumber: "A", keys: configuredKeys });
+  assert.deepEqual(requested, [["7d", "1m"]]);
+  runtime.stop();
+});
+
 test("serializes config updates behind an in-flight refresh", async () => {
-  const configA = { cchUrl: "https://a.example", apiKey: "key-a", refreshIntervalSeconds: 15, dateRangeDays: 7 };
-  const configB = { cchUrl: "https://b.example", apiKey: "key-b", refreshIntervalSeconds: 20, dateRangeDays: 3 };
+  const configA = { cchUrl: "https://a.example", apiKey: "key-a", refreshIntervalSeconds: 15 };
+  const configB = { cchUrl: "https://b.example", apiKey: "key-b", refreshIntervalSeconds: 20 };
   const plugin = makePlugin(configA);
   let resolveA;
   const firstLoad = new Promise((resolve) => { resolveA = resolve; });
@@ -76,7 +109,7 @@ test("serializes config updates behind an in-flight refresh", async () => {
     constructor(config) { this.config = config; instances.push(this); }
     load() {
       if (this.config.cchUrl === configA.cchUrl) return firstLoad;
-      return Promise.resolve({ quota: {}, today: { calls: 2 }, summary: {} });
+      return Promise.resolve({ quota: {}, today: { calls: 2 }, summaries: {} });
     }
   }
   const runtime = createPluginRuntime({
@@ -90,7 +123,7 @@ test("serializes config updates behind an in-flight refresh", async () => {
   const inFlight = runtime.refresh("initial");
   await Promise.resolve();
   const update = runtime.handlers.configUpdated({ config: configB });
-  resolveA({ quota: {}, today: { calls: 1 }, summary: {} });
+  resolveA({ quota: {}, today: { calls: 1 }, summaries: {} });
   await inFlight;
   await update;
   assert.deepEqual(instances.map((item) => item.config.cchUrl), [configA.cchUrl, configB.cchUrl]);
@@ -100,14 +133,14 @@ test("serializes config updates behind an in-flight refresh", async () => {
 });
 
 test("keeps successful cache and redacts secrets on API failure", async () => {
-  const config = { cchUrl: "https://hub.example", apiKey: "secret-api-key", refreshIntervalSeconds: 15, dateRangeDays: 7 };
+  const config = { cchUrl: "https://hub.example", apiKey: "secret-api-key", refreshIntervalSeconds: 15 };
   const plugin = makePlugin(config);
   let shouldFail = false;
   const errors = [];
   class FakeClient {
     async load() {
       if (shouldFail) throw new Error("upstream secret-api-key auth-token=session-1");
-      return { quota: {}, today: { calls: 9 }, summary: {} };
+      return { quota: {}, today: { calls: 9 }, summaries: {} };
     }
   }
   const runtime = createPluginRuntime({

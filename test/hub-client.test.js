@@ -18,12 +18,11 @@ function response(status, body, headers = {}) {
 const baseConfig = {
   cchUrl: "https://hub.example",
   apiKey: "secret-api-key",
-  dateRangeDays: 7,
   now: () => Date.parse("2026-09-12T01:00:00.000Z"),
   timeoutSignal: () => undefined,
 };
 
-test("loads all V1 endpoints with one login and Shanghai date range", async () => {
+test("loads requested endpoints with Shanghai date ranges", async () => {
   const calls = [];
   const fetchImpl = async (url, options = {}) => {
     calls.push({ url, options });
@@ -33,16 +32,34 @@ test("loads all V1 endpoints with one login and Shanghai date range", async () =
     return response(200, { totalRequests: 3 });
   };
   const client = new HubClient({ ...baseConfig, fetchImpl });
-  const result = await client.load();
+  const result = await client.load(["1d", "7d", "1m"]);
 
   assert.deepEqual(result.today, { calls: 2 });
   assert.equal(calls.filter((call) => call.url.endsWith("/api/auth/login")).length, 1);
   const summary = calls.find((call) => call.url.includes("stats-summary"));
   assert.match(summary.url, /startDate=2026-09-06&endDate=2026-09-12/);
+  assert.ok(calls.some((call) => call.url.includes("startDate=2026-08-14&endDate=2026-09-12")));
   for (const call of calls.filter((item) => !item.url.endsWith("/api/auth/login"))) {
     assert.equal(call.options.headers.Cookie, "auth-token=session-1");
   }
   assert.deepEqual(JSON.parse(calls[0].options.body), { key: "secret-api-key" });
+});
+
+test("only requests data needed by configured ranges", async () => {
+  const urls = [];
+  const client = new HubClient({
+    ...baseConfig,
+    fetchImpl: async (url) => {
+      urls.push(url);
+      if (url.endsWith("/api/auth/login")) return response(200, {}, { "set-cookie": "auth-token=session-1; Path=/" });
+      return response(200, { keyCurrent5hUsd: 1 });
+    },
+  });
+  const result = await client.load(["5h", "5h"]);
+  assert.deepEqual(result.summaries, {});
+  assert.equal(result.today, undefined);
+  assert.equal(urls.filter((url) => url.includes("stats-summary")).length, 0);
+  assert.equal(urls.filter((url) => url.endsWith("/api/v1/me/quota")).length, 1);
 });
 
 test("deduplicates concurrent login and re-authenticates once after 401", async () => {

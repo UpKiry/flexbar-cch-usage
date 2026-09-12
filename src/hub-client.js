@@ -1,4 +1,4 @@
-const { DEFAULTS, localDate } = require("./core");
+const { USAGE_RANGES, localDate, normalizeUsageRange } = require("./core");
 
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 
@@ -19,7 +19,6 @@ class HubClient {
     cchUrl,
     baseUrl,
     apiKey,
-    dateRangeDays = DEFAULTS.dateRangeDays,
     fetchImpl = globalThis.fetch,
     sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
     now = () => Date.now(),
@@ -27,7 +26,6 @@ class HubClient {
   }) {
     this.baseUrl = cchUrl || baseUrl;
     this.apiKey = apiKey;
-    this.dateRangeDays = dateRangeDays;
     this.fetchImpl = fetchImpl;
     this.sleep = sleep;
     this.now = now;
@@ -138,17 +136,30 @@ class HubClient {
     return this.loginPromise;
   }
 
-  async load() {
+  async load(ranges = USAGE_RANGES) {
     if (!this.cookie) await this.login();
+    const requested = new Set((Array.isArray(ranges) ? ranges : [ranges]).map((range) => normalizeUsageRange(range)).filter(Boolean));
     const endTime = this.now();
     const end = localDate(new Date(endTime));
-    const start = localDate(new Date(endTime - (this.dateRangeDays - 1) * 86400000));
-    const [quota, today, summary] = await Promise.all([
-      this.request("/api/v1/me/quota"),
-      this.request("/api/v1/me/today"),
-      this.request(`/api/v1/me/usage-logs/stats-summary?startDate=${encodeURIComponent(start)}&endDate=${encodeURIComponent(end)}`),
-    ]);
-    return { quota, today, summary };
+    const requests = [this.request("/api/v1/me/quota")];
+    if (requested.has("1d")) requests.push(this.request("/api/v1/me/today"));
+    const summaryRanges = [
+      ["7d", 7],
+      ["1m", 30],
+    ].filter(([range]) => requested.has(range));
+    for (const [range, days] of summaryRanges) {
+      const start = localDate(new Date(endTime - (days - 1) * 86400000));
+      requests.push(this.request(`/api/v1/me/usage-logs/stats-summary?startDate=${encodeURIComponent(start)}&endDate=${encodeURIComponent(end)}`));
+    }
+    const results = await Promise.all(requests);
+    const quota = results[0];
+    let resultIndex = 1;
+    const today = requested.has("1d") ? results[resultIndex++] : undefined;
+    return {
+      quota,
+      ...(requested.has("1d") ? { today } : {}),
+      summaries: Object.fromEntries(summaryRanges.map(([range]) => [range, results[resultIndex++]])),
+    };
   }
 }
 
