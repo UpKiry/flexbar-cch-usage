@@ -1,3 +1,5 @@
+const fs = require("node:fs");
+const path = require("node:path");
 const { USAGE_RANGES, number, textNumber, compactMoney, normalizedConfig, normalizeUsageRange } = require("./core");
 const { HubClient, redactSecrets } = require("./hub-client");
 const { WIDTH: RENDER_WIDTH, renderKey } = require("./render");
@@ -12,7 +14,8 @@ function emptyCache() {
 }
 
 function keyRange(key) {
-  return normalizeUsageRange(key?.data?.range, key?.cid?.endsWith("quota") ? "5h" : "1d");
+  if (key?.cid?.endsWith("quota")) return "5h";
+  return normalizeUsageRange(key?.data?.range, "1d");
 }
 
 function findMessageConfig(value, depth = 0) {
@@ -26,6 +29,34 @@ function findMessageConfig(value, depth = 0) {
   return undefined;
 }
 
+function hasConfig(value) {
+  return Boolean(value && typeof value.cchUrl === "string" && value.cchUrl.trim()
+    && typeof value.apiKey === "string" && value.apiKey.trim());
+}
+
+function readConfigBackup(configStorePath) {
+  if (!configStorePath) return null;
+  try {
+    const stored = JSON.parse(fs.readFileSync(configStorePath, "utf8"));
+    return hasConfig(stored) ? normalizedConfig(stored) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeConfigBackup(configStorePath, value) {
+  if (!configStorePath || !hasConfig(value)) return;
+  try {
+    fs.mkdirSync(path.dirname(configStorePath), { recursive: true, mode: 0o700 });
+    const temporaryPath = `${configStorePath}.${process.pid}.tmp`;
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(normalizedConfig(value))}\n`, { mode: 0o600 });
+    fs.renameSync(temporaryPath, configStorePath);
+    fs.chmodSync(configStorePath, 0o600);
+  } catch {
+    // The host configuration remains authoritative if the optional backup cannot be written.
+  }
+}
+
 function createPluginRuntime({
   plugin,
   logger,
@@ -34,6 +65,7 @@ function createPluginRuntime({
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
   now = () => Date.now(),
+  configStorePath,
 } = {}) {
   const keysByDevice = new Map();
   const renderedFingerprints = new Map();
@@ -47,6 +79,7 @@ function createPluginRuntime({
   let configUpdatePromise = Promise.resolve();
   let registered = false;
   let started = false;
+  let backupRestoreAttempted = false;
 
   function safeError(error) {
     return redactSecrets(error?.message || "查询失败", [config.apiKey, client?.cookie]);
@@ -57,22 +90,18 @@ function createPluginRuntime({
     const cid = key.cid;
     const suffix = state.stale ? " · 数据过期" : "";
     if (cid.endsWith("quota")) {
-      const range = keyRange(key);
-      if (range !== "5h") {
-        const data = range === "1d" ? state.today : state.summaries?.[range];
-        return `配额 ${range} ${compactMoney(data?.costUsd ?? data?.totalCost, data?.currencyCode)}${suffix}`;
-      }
       const current = state.quota?.keyCurrent5hUsd;
       const limit = state.quota?.keyLimit5hUsd;
       const percent = number(current) !== null && number(limit) > 0
         ? ` ${Math.min(999, current / limit * 100).toFixed(0)}%`
         : "";
-      return `配额 ${compactMoney(current)}/${compactMoney(limit)}${percent}${suffix}`;
+      return `配额 5 小时 ${compactMoney(current)}/${compactMoney(limit)}${percent}${suffix}`;
     }
     const range = keyRange(key);
-    if (range === "5h") return `用量 5h ${compactMoney(state.quota?.keyCurrent5hUsd, state.quota?.currencyCode)}${suffix}`;
+    if (range === "5h") return `用量 5 小时 ${compactMoney(state.quota?.keyCurrent5hUsd, state.quota?.currencyCode)}${suffix}`;
     const data = range === "1d" ? state.today : state.summaries?.[range];
-    return `用量 ${range} ${textNumber(data?.calls ?? data?.totalRequests)}次 ${compactMoney(data?.costUsd ?? data?.totalCost, data?.currencyCode)}${suffix}`;
+    const rangeLabel = { "1d": "1 天", "7d": "7 天", "1m": "30 天" }[range] || range;
+    return `用量 ${rangeLabel} ${textNumber(data?.calls ?? data?.totalRequests)}次 ${compactMoney(data?.costUsd ?? data?.totalCost, data?.currencyCode)}${suffix}`;
   }
 
   function requiredRanges() {
@@ -164,7 +193,16 @@ function createPluginRuntime({
         return config;
       }
     }
-    const next = normalizedConfig(stored);
+    let next = normalizedConfig(stored);
+    const backup = readConfigBackup(configStorePath);
+    if (!hasConfig(next) && backup) {
+      next = backup;
+      if (!backupRestoreAttempted && typeof plugin.setConfig === "function") {
+        backupRestoreAttempted = true;
+        plugin.setConfig(next).catch((error) => logger.warn(`恢复插件配置失败：${safeError(error)}`));
+      }
+    }
+    if (hasConfig(next)) writeConfigBackup(configStorePath, next);
     const changed = next.cchUrl !== config.cchUrl
       || next.apiKey !== config.apiKey
       || next.refreshIntervalSeconds !== config.refreshIntervalSeconds;
@@ -256,6 +294,7 @@ function createPluginRuntime({
 
     configUpdated(payload) {
       const storedConfig = payload?.config || payload?.data?.config || {};
+      writeConfigBackup(configStorePath, storedConfig);
       const update = configUpdatePromise.then(async () => {
         if (refreshPromise) await refreshPromise;
         client = null;
@@ -285,6 +324,17 @@ function createPluginRuntime({
         : payload?.data && typeof payload.data === "object"
           ? { ...payload, ...payload.data }
           : payload || {};
+      if (message.action === "getConfig") {
+        const current = await loadConfig();
+        return { status: "success", config: { ...current } };
+      }
+      if (message.action === "applyConfig") {
+        const nextConfig = normalizedConfig(findMessageConfig(message) || {});
+        if (!hasConfig(nextConfig)) return { status: "error", message: "请填写 CC Hub URL 和 API Key" };
+        writeConfigBackup(configStorePath, nextConfig);
+        await handlers.configUpdated({ config: nextConfig });
+        return { status: "success", message: "配置已应用，按键正在刷新" };
+      }
       if (message.action !== "testConnection") return { status: "error", message: "未知操作" };
       const testConfig = normalizedConfig(
         findMessageConfig(message) || await plugin.getConfig().catch(() => ({})),

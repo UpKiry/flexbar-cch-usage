@@ -1,7 +1,7 @@
 {
   "name": "flexbar-cch-usage",
   "uuid": "com.upkiry.flexbarcchusage",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "author": "Upkiry",
   "entry": "backend/plugin.cjs",
   "description": "在 Flexbar 上实时查看 Claude Code Hub 用量",
@@ -18,7 +18,7 @@
     "title": "$PluginName",
     "style": { "icon": "mdi mdi-chart-box-outline" },
     "children": [
-      { "title": "配额", "tip": "查看指定时间范围的配额或成本", "cid": "com.upkiry.flexbarcchusage.quota", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-gauge", "width": 240 }, "data": { "query": "quota", "range": "5h" } },
+      { "title": "配额", "tip": "查看 5 小时配额的当前使用金额和上限", "cid": "com.upkiry.flexbarcchusage.quota", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-gauge", "width": 240 }, "data": { "query": "quota", "range": "5h" } },
       { "title": "用量", "tip": "查看指定时间范围的调用和成本", "cid": "com.upkiry.flexbarcchusage.usage", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-chart-timeline-variant", "width": 240 }, "data": { "query": "usage", "range": "1d" } }
     ]
   },

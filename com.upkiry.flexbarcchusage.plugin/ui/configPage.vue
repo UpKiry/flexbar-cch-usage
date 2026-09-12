@@ -38,7 +38,11 @@ export default {
     },
     async loadConfig() {
       try {
-        const stored = await this.$fd.getConfig();
+        let stored = await this.$fd.getConfig();
+        if (!stored?.cchUrl || !stored?.apiKey) {
+          const restored = await this.$fd.sendToBackend({ action: "getConfig" }).catch(() => null);
+          if (restored?.status === "success" && restored.config) stored = restored.config;
+        }
         this.form = { ...DEFAULT_CONFIG, ...(stored || {}) };
       } catch (error) {
         this.saveResult = error?.message || "读取配置失败";
@@ -50,11 +54,24 @@ export default {
     async saveConfig() {
       if (!this.isValid) return;
       this.saving = true; this.saveResult = ""; this.saveError = false;
+      let persisted = false;
       try {
-        await this.$fd.setConfig(this.serializableConfig());
-        this.saveResult = "配置已保存";
+        const config = this.serializableConfig();
+        await this.$fd.setConfig(config);
+        persisted = true;
+        this.saveResult = "配置已保存，插件正在重启";
+        const restart = globalThis.window?.electronAPI?.pluginOperation;
+        if (typeof restart === "function") {
+          await restart({ type: "restart", uuid: "com.upkiry.flexbarcchusage" });
+        } else {
+          const result = await this.$fd.sendToBackend({ action: "applyConfig", config });
+          if (result?.status !== "success") throw new Error(result?.message || "刷新失败");
+        }
+        this.saveResult = "配置已保存，插件已重启";
       } catch (error) {
-        this.saveResult = error?.message || "保存配置失败";
+        this.saveResult = persisted
+          ? `配置已保存，但插件重启失败：${error?.message || "请稍后手动重启插件"}`
+          : (error?.message || "保存配置失败");
         this.saveError = true;
       } finally {
         this.saving = false;
@@ -62,10 +79,8 @@ export default {
     },
     async testConnection() {
       if (!this.isValid) return;
-      this.testing = true; this.testResult = ""; this.testError = false;
+      this.testing = true; this.testResult = ""; this.testError = false; this.saveResult = ""; this.saveError = false;
       try {
-        await this.saveConfig();
-        if (this.saveError) return;
         const result = await this.$fd.sendToBackend({ action: "testConnection", config: this.serializableConfig() });
         this.testResult = result?.message || "连接成功"; this.testError = result?.status !== "success";
       } catch (error) { this.testResult = error?.message || "连接失败"; this.testError = true; }
