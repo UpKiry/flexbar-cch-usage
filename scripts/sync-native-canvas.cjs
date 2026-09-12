@@ -1,15 +1,20 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
+const platformKey = `${process.platform}-${process.arch}`;
 const platformPackage = {
   "darwin-arm64": "@napi-rs/canvas-darwin-arm64",
   "darwin-x64": "@napi-rs/canvas-darwin-x64",
   "win32-x64": "@napi-rs/canvas-win32-x64-msvc",
   "win32-arm64": "@napi-rs/canvas-win32-arm64-msvc",
-}[`${process.platform}-${process.arch}`];
+}[platformKey];
 
 if (!platformPackage) {
-  throw new Error(`不支持的 canvas 构建平台：${process.platform}-${process.arch}`);
+  // Linux is used by the release workflow only as a packaging runner. The
+  // distributable already contains the macOS and Windows native modules, so
+  // there is no Linux binary to synchronize into the plugin bundle.
+  console.log(`跳过 canvas 原生模块同步：${platformKey}（使用包内现有平台模块）`);
+  process.exit(0);
 }
 
 const source = path.dirname(require.resolve(`${platformPackage}/package.json`));
