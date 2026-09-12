@@ -2,7 +2,7 @@
 
 这是一个用于 Flexbar/FlexDesigner 的 Claude Code Hub 用量仪表盘插件。它通过 CC Hub 的登录 API 获取配额、今日用量和日期汇总，并在 Flexbar 上显示四个固定按键。按键使用插件自绘 PNG 和内嵌 CJK 字体，避免原生标题布局重叠或中文缺字：
 
-当前版本：`1.1.1`
+当前版本：`1.2.0`
 
 - 用量总览
 - 5 小时配额
@@ -24,7 +24,7 @@ API Key 只保存在 FlexDesigner 配置中，不会写入按键数据或日志�
 
 ## 开发
 
-环境要求：Node.js 18+、FlexDesigner 1.3+、Flexbar。自绘渲染使用 `@napi-rs/canvas`，按键目标尺寸为 240×60；设备返回 180px 宽度时自动使用紧凑布局。
+环境要求：Node.js 18+、FlexDesigner 1.3+、Flexbar。自绘渲染使用 `@napi-rs/canvas`，按键目标尺寸为 240×60；设备返回 180px 宽度时自动使用紧凑布局。构建时会把当前 Node 平台对应的 canvas 原生模块同步到插件包；当前发布包同时包含 macOS arm64 与 Windows x64 原生模块。
 
 ~~~bash
 npm install
@@ -50,3 +50,14 @@ npm run plugin:install
 - `GET /api/v1/me/usage-logs/stats-summary`
 
 登录 Cookie 在插件进程内复用；401 会重新登录一次，临时错误会进行一次退避重试。
+
+## 验证
+
+V1 的客户端、刷新并发、缓存保留、多设备按键隔离、事件处理和 PNG 绘制均有 Node.js mock 测试覆盖。提交前运行：
+
+~~~bash
+npm test
+npm run build
+npm run plugin:validate
+npm run plugin:pack
+~~~

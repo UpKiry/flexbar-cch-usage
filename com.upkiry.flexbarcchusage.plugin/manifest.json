@@ -1,7 +1,7 @@
 {
   "name": "flexbar-cch-usage",
   "uuid": "com.upkiry.flexbarcchusage",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "author": "Upkiry",
   "entry": "backend/plugin.cjs",
   "description": "在 Flexbar 上实时查看 Claude Code Hub 用量",

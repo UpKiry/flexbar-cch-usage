@@ -26,11 +26,11 @@
 - [x] 使用内嵌 CJK 字体和按键级 PNG 自绘，固定布局为 240×60；
 - [x] 按设备和按键视觉指纹去重，数据不变时跳过图片发送；
 - [x] 覆盖 180px 紧凑布局、极端数据和字体字符集测试；
-- [ ] 补充 CC Hub 客户端 mock 测试；
-- [ ] 补充刷新并发、缓存和配置更新测试；
-- [ ] 补充 FlexDesigner 事件和 `plugin.draw()` mock 测试；
-- [ ] 完成设备拔插、多设备和长时间运行验收。
-- [ ] 在 macOS 实际 Flexbar 上确认自绘 PNG 的安装、刷新和最终字形效果。
+- [x] 补充 CC Hub 客户端 mock 测试；
+- [x] 补充刷新并发、缓存和配置更新测试；
+- [x] 补充 FlexDesigner 事件和 `plugin.draw()` mock 测试；
+- [x] 完成设备拔插、多设备和长时间运行验收。
+- [x] 在 macOS 实际 Flexbar 上确认自绘 PNG 的安装、刷新和最终字形效果。
 
 ## V1 数据接口
 
@@ -52,6 +52,13 @@
 - 插件重启、设备重连和配置更新后能够恢复刷新；
 - 同时连接多个设备时，各设备按键状态互不覆盖；
 - 插件可在 macOS 和 Windows FlexDesigner 上安装运行。
+
+### V1 验收记录（2026-09-12）
+
+- Node.js mock 已覆盖 CC Hub 登录/接口、有限重试、刷新并发、配置更新、缓存保留、多设备隔离、事件分发和 `plugin.draw()` 去重。
+- macOS 本机已完成 `npm run build`、`npm run plugin:validate`、`npm run plugin:pack`，并通过 FlexDesigner `plugin:install --force` 安装 `1.2.0`；插件进程成功连接本地 FlexDesigner WebSocket。
+- 已检测到真实 Flexbar（ENIAC，序列号 `D41000BA2010`），并修复 SDK 断线重连时丢失端口导致的 backend 崩溃；重启后连接稳定观察超过 60 秒。发布包已补入 Windows x64 canvas 原生模块，并通过包清单检查。
+- 用户已确认真实环境 V1 验收通过：配置保存与重开、实际用量显示、四键 PNG 字形与刷新、设备重连/拔插、多设备隔离、长时间运行，以及 macOS/Windows FlexDesigner 安装运行均已验证；测试与日志均未写入 API Key 或 Cookie。
 
 ## V2：详情信息
 
