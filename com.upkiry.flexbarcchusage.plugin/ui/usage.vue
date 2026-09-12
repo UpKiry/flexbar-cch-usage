@@ -8,10 +8,10 @@
 
 <script>
 const RANGES = [
-  { value: "5h", label: "5h（最近 5 小时）" },
-  { value: "1d", label: "1d（今日）" },
-  { value: "7d", label: "7d（最近 7 天）" },
-  { value: "1m", label: "1m（最近 30 天）" },
+  { value: "5h", label: "5 小时" },
+  { value: "1d", label: "1 天" },
+  { value: "7d", label: "7 天" },
+  { value: "1m", label: "30 天" },
 ];
 
 export default {
@@ -31,6 +31,6 @@ export default {
       this.$emit("update:modelValue", { ...model, data: { ...data, range: this.range } });
     },
   },
-  mounted() { this.range = this.readRange(); this.emitUpdate(); },
+  mounted() { this.range = this.readRange(); },
 };
 </script>

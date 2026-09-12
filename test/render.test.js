@@ -53,6 +53,13 @@ test("renders safe fixed states without arbitrary API error text", () => {
   assert.equal(critical.view.status, "数据过期");
 });
 
+test("quota renders current usage and limit together", () => {
+  const rendered = renderKey("com.upkiry.flexbarcchusage.quota", state, config, WIDTH, { range: "7d" });
+  assert.equal(rendered.view.label, "配额 · 5 小时");
+  assert.match(rendered.view.value, /\$8\.40\/\$10\.00/);
+  assert.match(rendered.view.value, /84%/);
+});
+
 test("keeps extreme values bounded across twenty data sets", () => {
   for (let index = 0; index < 20; index += 1) {
     const extreme = {

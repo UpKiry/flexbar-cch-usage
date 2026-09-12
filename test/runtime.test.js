@@ -1,5 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { createPluginRuntime } = require("../src/runtime");
 
 const IDS = ["quota", "usage"];
@@ -89,7 +92,7 @@ test("requests the union of configured usage ranges", async () => {
     clearIntervalFn: () => {},
   });
   const configuredKeys = [
-    { cid: cid("quota"), uid: "quota", width: 240, style: {}, data: {} },
+    { cid: cid("quota"), uid: "quota", width: 240, style: {}, data: { range: "7d" } },
     { cid: cid("usage"), uid: "usage-7d", width: 240, style: {}, data: { range: "7d" } },
     { cid: cid("usage"), uid: "usage-1m", width: 240, style: {}, data: { range: "1m" } },
   ];
@@ -130,6 +133,66 @@ test("serializes config updates behind an in-flight refresh", async () => {
   assert.equal(runtime.getState().config.cchUrl, configB.cchUrl);
   assert.equal(runtime.getState().cache.today.calls, 2);
   runtime.stop();
+});
+
+test("applies a saved UI config immediately and refreshes the keys", async () => {
+  const configA = { cchUrl: "https://a.example", apiKey: "key-a", refreshIntervalSeconds: 15 };
+  const configB = { cchUrl: "https://b.example", apiKey: "key-b", refreshIntervalSeconds: 20 };
+  const plugin = makePlugin(configA);
+  const instances = [];
+  class FakeClient {
+    constructor(config) { this.config = config; instances.push(this); }
+    async load() { return { quota: { keyCurrent5hUsd: 1, keyLimit5hUsd: 2 }, today: { calls: 2 }, summaries: {} }; }
+  }
+  const runtime = createPluginRuntime({
+    plugin,
+    logger: { error: () => {}, warn: () => {} },
+    HubClientClass: FakeClient,
+    renderKeyFn,
+    setIntervalFn: () => ({}),
+    clearIntervalFn: () => {},
+  });
+  await runtime.handlers.alive({ serialNumber: "A", keys: keys() });
+  const result = await runtime.handlers.uiMessage({ action: "applyConfig", config: configB });
+  assert.equal(result.status, "success");
+  assert.equal(runtime.getState().config.cchUrl, configB.cchUrl);
+  assert.equal(instances.at(-1).config.cchUrl, configB.cchUrl);
+  runtime.stop();
+});
+
+test("restores configuration from the user backup after a reinstall reset", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "flexbar-cch-usage-"));
+  const configStorePath = path.join(directory, "config.json");
+  const config = { cchUrl: "https://saved.example", apiKey: "saved-key", refreshIntervalSeconds: 30 };
+  class FakeClient { async load() { return { quota: {}, today: {}, summaries: {} }; } }
+  const firstPlugin = makePlugin(config);
+  const firstRuntime = createPluginRuntime({
+    plugin: firstPlugin,
+    logger: { error: () => {}, warn: () => {} },
+    HubClientClass: FakeClient,
+    configStorePath,
+    setIntervalFn: () => ({}),
+    clearIntervalFn: () => {},
+  });
+  await firstRuntime.refresh("initial");
+  firstRuntime.stop();
+
+  let restored;
+  const secondPlugin = makePlugin({});
+  secondPlugin.setConfig = async (value) => { restored = value; };
+  const secondRuntime = createPluginRuntime({
+    plugin: secondPlugin,
+    logger: { error: () => {}, warn: () => {} },
+    HubClientClass: FakeClient,
+    configStorePath,
+    setIntervalFn: () => ({}),
+    clearIntervalFn: () => {},
+  });
+  await secondRuntime.refresh("reinstall");
+  assert.equal(secondRuntime.getState().config.cchUrl, config.cchUrl);
+  assert.equal(restored.apiKey, config.apiKey);
+  secondRuntime.stop();
+  fs.rmSync(directory, { recursive: true, force: true });
 });
 
 test("keeps successful cache and redacts secrets on API failure", async () => {

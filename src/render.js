@@ -8,7 +8,7 @@ const COMPACT_WIDTH = 180;
 const HEIGHT = 60;
 const FONT_FAMILY = "FlexCJK";
 const FONT_NAME = "SourceHanSansCJK-subset.woff2";
-const REQUIRED_GLYPHS = "配额用量小时数据过期请配置未无限制次调用成本刷新连接失败需要配置h d m0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzCC Hub∞$%/.-,:·…";
+const REQUIRED_GLYPHS = "配额用量小时天最近数据过期请配置未无限制次调用成本刷新连接失败需要配置h d m0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzCC Hub∞$%/.-,:·…";
 const FONT_PATHS = [
   path.resolve(__dirname, "../resources/fonts", FONT_NAME),
   path.resolve(__dirname, "../com.upkiry.flexbarcchusage.plugin/resources/fonts", FONT_NAME),
@@ -50,21 +50,11 @@ function metric(cid, state, config, keyData = {}) {
   const stale = Boolean(state.stale);
   const suffix = stale ? "数据过期" : "";
   if (cid.endsWith("quota")) {
-    const range = normalizeUsageRange(keyData.range, "5h");
-    if (range !== "5h") {
-      const data = range === "1d" ? state.today : state.summaries?.[range];
-      return {
-        label: `配额 · ${range}`,
-        value: money(data?.costUsd ?? data?.totalCost, data?.currencyCode),
-        tone: stale ? "stale" : "normal",
-        status: suffix,
-      };
-    }
     const current = finite(state.quota?.keyCurrent5hUsd);
     const limit = finite(state.quota?.keyLimit5hUsd);
     const percent = current !== null && limit > 0 ? Math.min(999, current / limit * 100) : null;
     return {
-      label: "配额 · 5h",
+      label: "配额 · 5 小时",
       value: `${money(current)}/${money(limit)}${percent === null ? "" : ` ${percent.toFixed(0)}%`}`,
       tone: percent !== null && percent >= 95 ? "critical" : percent !== null && percent >= 80 ? "warning" : stale ? "stale" : "normal",
       status: suffix,
@@ -74,15 +64,16 @@ function metric(cid, state, config, keyData = {}) {
   const range = normalizeUsageRange(keyData.range);
   if (range === "5h") {
     return {
-      label: "用量 · 5h",
+      label: "用量 · 5 小时",
       value: money(state.quota?.keyCurrent5hUsd, state.quota?.currencyCode),
       tone: stale ? "stale" : "normal",
       status: suffix,
     };
   }
   const data = range === "1d" ? state.today : state.summaries?.[range];
+  const rangeLabel = { "1d": "1 天", "7d": "7 天", "1m": "30 天" }[range] || range;
   return {
-    label: `用量 · ${range}`,
+    label: `用量 · ${rangeLabel}`,
     value: `${count(data?.calls ?? data?.totalRequests)} 次 · ${money(data?.costUsd ?? data?.totalCost, data?.currencyCode)}`,
     tone: stale ? "stale" : "normal",
     status: suffix,
