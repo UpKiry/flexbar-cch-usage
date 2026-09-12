@@ -94,7 +94,7 @@ test("requests the union of configured usage ranges", async () => {
     { cid: cid("usage"), uid: "usage-1m", width: 240, style: {}, data: { range: "1m" } },
   ];
   await runtime.handlers.alive({ serialNumber: "A", keys: configuredKeys });
-  assert.deepEqual(requested, [["7d", "1m"]]);
+  assert.deepEqual(requested, [["5h", "7d", "1m"]]);
   runtime.stop();
 });
 

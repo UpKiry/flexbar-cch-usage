@@ -50,6 +50,16 @@ function metric(cid, state, config, keyData = {}) {
   const stale = Boolean(state.stale);
   const suffix = stale ? "数据过期" : "";
   if (cid.endsWith("quota")) {
+    const range = normalizeUsageRange(keyData.range, "5h");
+    if (range !== "5h") {
+      const data = range === "1d" ? state.today : state.summaries?.[range];
+      return {
+        label: `配额 · ${range}`,
+        value: money(data?.costUsd ?? data?.totalCost, data?.currencyCode),
+        tone: stale ? "stale" : "normal",
+        status: suffix,
+      };
+    }
     const current = finite(state.quota?.keyCurrent5hUsd);
     const limit = finite(state.quota?.keyLimit5hUsd);
     const percent = current !== null && limit > 0 ? Math.min(999, current / limit * 100) : null;
