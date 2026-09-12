@@ -12,7 +12,7 @@ function emptyCache() {
 }
 
 function keyRange(key) {
-  return normalizeUsageRange(key?.data?.range);
+  return normalizeUsageRange(key?.data?.range, key?.cid?.endsWith("quota") ? "5h" : "1d");
 }
 
 function findMessageConfig(value, depth = 0) {
@@ -37,6 +37,8 @@ function createPluginRuntime({
 } = {}) {
   const keysByDevice = new Map();
   const renderedFingerprints = new Map();
+  const pendingFingerprints = new Map();
+  const drawQueues = new Map();
   let config = {};
   let client;
   let cache = emptyCache();
@@ -55,6 +57,11 @@ function createPluginRuntime({
     const cid = key.cid;
     const suffix = state.stale ? " · 数据过期" : "";
     if (cid.endsWith("quota")) {
+      const range = keyRange(key);
+      if (range !== "5h") {
+        const data = range === "1d" ? state.today : state.summaries?.[range];
+        return `配额 ${range} ${compactMoney(data?.costUsd ?? data?.totalCost, data?.currencyCode)}${suffix}`;
+      }
       const current = state.quota?.keyCurrent5hUsd;
       const limit = state.quota?.keyLimit5hUsd;
       const percent = number(current) !== null && number(limit) > 0
@@ -72,7 +79,7 @@ function createPluginRuntime({
     const ranges = new Set();
     for (const keys of keysByDevice.values()) {
       for (const key of keys.values()) {
-        if (key.cid.endsWith("usage")) ranges.add(keyRange(key));
+        ranges.add(keyRange(key));
       }
     }
     return USAGE_RANGES.filter((range) => ranges.has(range));
@@ -83,7 +90,8 @@ function createPluginRuntime({
     const width = Number(key.width || key.style?.width || RENDER_WIDTH);
     const rendered = renderKeyFn(key.cid, cache, config, width, key.data || {});
     const fingerprintKey = `${serialNumber}:${key.uid || key.cid}`;
-    if (renderedFingerprints.get(fingerprintKey) === rendered.fingerprint) return null;
+    if (renderedFingerprints.get(fingerprintKey) === rendered.fingerprint
+      || pendingFingerprints.get(fingerprintKey) === rendered.fingerprint) return null;
     key.style = {
       ...(key.style || {}),
       width: rendered.width,
@@ -92,15 +100,29 @@ function createPluginRuntime({
       showImage: false,
     };
     key.title = keyView(key);
+    pendingFingerprints.set(fingerprintKey, rendered.fingerprint);
     return { serialNumber, key, image: rendered.dataUrl, fingerprintKey, fingerprint: rendered.fingerprint };
   }
 
   function sendDraws(updates) {
-    return Promise.all(updates.map(({ serialNumber, key, image, fingerprintKey, fingerprint }) =>
-      Promise.resolve()
-        .then(() => plugin.draw(serialNumber, key, "base64", image))
-        .then(() => renderedFingerprints.set(fingerprintKey, fingerprint))
-        .catch((error) => logger.error("更新 Flexbar 按键失败", error))));
+    return Promise.all(updates.map((update) => {
+      const previous = drawQueues.get(update.serialNumber) || Promise.resolve();
+      const next = previous.catch(() => {}).then(async () => {
+        if (!keysByDevice.has(update.serialNumber)) {
+          pendingFingerprints.delete(update.fingerprintKey);
+          return;
+        }
+        try {
+          await plugin.draw(update.serialNumber, update.key, "base64", update.image);
+          renderedFingerprints.set(update.fingerprintKey, update.fingerprint);
+        } catch (error) {
+          pendingFingerprints.delete(update.fingerprintKey);
+          logger.error("更新 Flexbar 按键失败", error);
+        }
+      });
+      drawQueues.set(update.serialNumber, next);
+      return next;
+    }));
   }
 
   function drawKey(serialNumber, key) {
@@ -193,8 +215,12 @@ function createPluginRuntime({
 
   function forgetDevice(serialNumber) {
     keysByDevice.delete(serialNumber);
+    drawQueues.delete(serialNumber);
     for (const key of renderedFingerprints.keys()) {
-      if (key.startsWith(`${serialNumber}:`)) renderedFingerprints.delete(key);
+      if (key.startsWith(`${serialNumber}:`)) {
+        renderedFingerprints.delete(key);
+        pendingFingerprints.delete(key);
+      }
     }
   }
 
@@ -216,6 +242,12 @@ function createPluginRuntime({
     async data(payload) {
       const key = payload?.data?.key;
       if (!key || !KEY_CIDS.has(key.cid)) return { status: "error", message: "未知按键" };
+      const serial = payload?.serialNumber;
+      if (serial && keysByDevice.has(serial)) {
+        keysByDevice.get(serial).set(key.uid || key.cid, key);
+        renderedFingerprints.delete(`${serial}:${key.uid || key.cid}`);
+        pendingFingerprints.delete(`${serial}:${key.uid || key.cid}`);
+      }
       await refresh("点击刷新");
       return cache.error
         ? { status: "error", message: cache.error }

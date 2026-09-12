@@ -1,21 +1,14 @@
 <template>
   <v-container>
-    <v-select
-      v-model="range"
-      :items="ranges"
-      item-title="label"
-      item-value="value"
-      label="时间范围"
-      outlined
-      hide-details
-      @update:modelValue="emitUpdate"
-    />
+    <v-radio-group v-model="range" label="时间范围" hide-details @update:modelValue="emitUpdate">
+      <v-radio v-for="item in ranges" :key="item.value" :label="item.label" :value="item.value" />
+    </v-radio-group>
   </v-container>
 </template>
 
 <script>
 const RANGES = [
-  { value: "5h", label: "5h（最近 5 小时配额）" },
+  { value: "5h", label: "5h（最近 5 小时）" },
   { value: "1d", label: "1d（今日）" },
   { value: "7d", label: "7d（最近 7 天）" },
   { value: "1m", label: "1m（最近 30 天）" },
@@ -23,21 +16,10 @@ const RANGES = [
 
 export default {
   name: "UsageSettings",
-  props: {
-    modelValue: { type: Object, required: true },
-  },
+  props: { modelValue: { type: Object, required: true } },
   emits: ["update:modelValue"],
-  data() {
-    return { range: "1d", ranges: RANGES };
-  },
-  watch: {
-    modelValue: {
-      deep: true,
-      handler() {
-        this.range = this.readRange();
-      },
-    },
-  },
+  data() { return { range: "1d", ranges: RANGES }; },
+  watch: { modelValue: { deep: true, handler() { this.range = this.readRange(); } } },
   methods: {
     readRange() {
       const value = this.modelValue?.data?.range;
@@ -49,9 +31,6 @@ export default {
       this.$emit("update:modelValue", { ...model, data: { ...data, range: this.range } });
     },
   },
-  mounted() {
-    this.range = this.readRange();
-    this.emitUpdate();
-  },
+  mounted() { this.range = this.readRange(); this.emitUpdate(); },
 };
 </script>

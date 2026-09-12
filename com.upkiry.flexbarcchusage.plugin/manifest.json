@@ -18,7 +18,7 @@
     "title": "$PluginName",
     "style": { "icon": "mdi mdi-chart-box-outline" },
     "children": [
-      { "title": "配额", "tip": "查看当前 5 小时配额", "cid": "com.upkiry.flexbarcchusage.quota", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-gauge", "width": 240 }, "data": { "query": "quota" } },
+      { "title": "配额", "tip": "查看指定时间范围的配额或成本", "cid": "com.upkiry.flexbarcchusage.quota", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-gauge", "width": 240 }, "data": { "query": "quota", "range": "5h" } },
       { "title": "用量", "tip": "查看指定时间范围的调用和成本", "cid": "com.upkiry.flexbarcchusage.usage", "config": { "keyType": "default", "clickable": true, "platform": ["windows", "mac"] }, "style": { "icon": "mdi mdi-chart-timeline-variant", "width": 240 }, "data": { "query": "usage", "range": "1d" } }
     ]
   },
