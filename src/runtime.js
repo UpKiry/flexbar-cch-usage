@@ -71,6 +71,7 @@ function createPluginRuntime({
   const renderedFingerprints = new Map();
   const pendingFingerprints = new Map();
   const drawQueues = new Map();
+  const deviceGenerations = new Map();
   let config = {};
   let client;
   let cache = emptyCache();
@@ -126,18 +127,26 @@ function createPluginRuntime({
       width: rendered.width,
       showTitle: false,
       showIcon: false,
-      showImage: false,
+      showImage: true,
     };
     key.title = keyView(key);
     pendingFingerprints.set(fingerprintKey, rendered.fingerprint);
-    return { serialNumber, key, image: rendered.dataUrl, fingerprintKey, fingerprint: rendered.fingerprint };
+    return {
+      serialNumber,
+      generation: deviceGenerations.get(serialNumber) || 0,
+      key,
+      image: rendered.dataUrl,
+      fingerprintKey,
+      fingerprint: rendered.fingerprint,
+    };
   }
 
   function sendDraws(updates) {
     return Promise.all(updates.map((update) => {
       const previous = drawQueues.get(update.serialNumber) || Promise.resolve();
       const next = previous.catch(() => {}).then(async () => {
-        if (!keysByDevice.has(update.serialNumber)) {
+        if (!keysByDevice.has(update.serialNumber)
+          || (deviceGenerations.get(update.serialNumber) || 0) !== update.generation) {
           pendingFingerprints.delete(update.fingerprintKey);
           return;
         }
@@ -152,11 +161,6 @@ function createPluginRuntime({
       drawQueues.set(update.serialNumber, next);
       return next;
     }));
-  }
-
-  function drawKey(serialNumber, key) {
-    const update = prepareKey(serialNumber, key);
-    return update ? sendDraws([update]) : Promise.resolve([]);
   }
 
   function drawAll() {
@@ -252,6 +256,7 @@ function createPluginRuntime({
   }
 
   function forgetDevice(serialNumber) {
+    deviceGenerations.set(serialNumber, (deviceGenerations.get(serialNumber) || 0) + 1);
     keysByDevice.delete(serialNumber);
     drawQueues.delete(serialNumber);
     for (const key of renderedFingerprints.keys()) {
@@ -272,7 +277,6 @@ function createPluginRuntime({
         if (KEY_CIDS.has(key.cid)) keys.set(key.uid || key.cid, key);
       }
       keysByDevice.set(serial, keys);
-      await Promise.all([...keys.values()].map((key) => drawKey(serial, key)));
       await refresh("启动刷新");
       restartTimer();
     },

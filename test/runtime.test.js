@@ -17,7 +17,7 @@ function makePlugin(config) {
     on: (event, handler) => handlers.set(event, handler),
     start: () => {},
     getConfig: async () => config,
-    draw: async (serial, key, format, image) => draws.push({ serial, uid: key.uid, format, image, title: key.title }),
+    draw: async (serial, key, format, image) => draws.push({ serial, uid: key.uid, format, image, title: key.title, style: { ...key.style } }),
   };
 }
 
@@ -58,9 +58,10 @@ test("registers FlexDesigner events, isolates devices, and deduplicates draws", 
   assert.equal(plugin.handlers.size, 5);
   await plugin.handlers.get("plugin.alive")({ serialNumber: "A", keys: keys() });
   await plugin.handlers.get("plugin.alive")({ serialNumber: "B", keys: keys() });
+  assert.equal(plugin.draws[0].style?.showImage, true);
   assert.equal(loads, 2);
   assert.equal(runtime.getState().deviceCount, 2);
-  assert.equal(plugin.draws.filter((draw) => draw.serial === "A").length, 4);
+  assert.equal(plugin.draws.filter((draw) => draw.serial === "A").length, 2);
   assert.equal(plugin.draws.filter((draw) => draw.serial === "B").length, 2);
   const before = plugin.draws.length;
   await plugin.handlers.get("plugin.data")({ data: { key: keys()[0] } });
@@ -68,6 +69,40 @@ test("registers FlexDesigner events, isolates devices, and deduplicates draws", 
   await plugin.handlers.get("device.status")([{ serialNumber: "A", status: "disconnected" }]);
   assert.equal(runtime.getState().deviceCount, 1);
   assert.deepEqual(logs.errors, []);
+  runtime.stop();
+});
+
+test("loads startup data before the first key draw", async () => {
+  const plugin = makePlugin({ cchUrl: "https://hub.example", apiKey: "secret", refreshIntervalSeconds: 15 });
+  const events = [];
+  const renderedCalls = [];
+  plugin.draw = async (...args) => {
+    events.push("draw");
+    plugin.draws.push({ serial: args[0], uid: args[1].uid, format: args[2], image: args[3] });
+  };
+  class FakeClient {
+    async load() {
+      events.push("load");
+      return { quota: { keyCurrent5hUsd: 1, keyLimit5hUsd: 2 }, today: { calls: 42 }, summaries: {} };
+    }
+  }
+  const runtime = createPluginRuntime({
+    plugin,
+    logger: { error: () => {}, warn: () => {} },
+    HubClientClass: FakeClient,
+    renderKeyFn: (keyCid, state, currentConfig, width) => {
+      renderedCalls.push(state.today?.calls ?? null);
+      return renderKeyFn(keyCid, state, currentConfig, width);
+    },
+    setIntervalFn: () => ({}),
+    clearIntervalFn: () => {},
+  });
+
+  await runtime.handlers.alive({ serialNumber: "A", keys: keys() });
+
+  assert.equal(events[0], "load");
+  assert.deepEqual(renderedCalls, [42, 42]);
+  assert.equal(plugin.draws.length, 2);
   runtime.stop();
 });
 
