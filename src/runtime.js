@@ -1,16 +1,18 @@
-const { number, textNumber, compactMoney, normalizedConfig } = require("./core");
+const { USAGE_RANGES, number, textNumber, compactMoney, normalizedConfig, normalizeUsageRange } = require("./core");
 const { HubClient, redactSecrets } = require("./hub-client");
 const { WIDTH: RENDER_WIDTH, renderKey } = require("./render");
 
 const KEY_CIDS = new Set([
-  "com.upkiry.flexbarcchusage.overview",
   "com.upkiry.flexbarcchusage.quota",
-  "com.upkiry.flexbarcchusage.today",
-  "com.upkiry.flexbarcchusage.range",
+  "com.upkiry.flexbarcchusage.usage",
 ]);
 
 function emptyCache() {
-  return { quota: null, today: null, summary: null, fetchedAt: null, stale: true, error: null };
+  return { quota: null, today: null, summaries: {}, fetchedAt: null, stale: true, error: null };
+}
+
+function keyRange(key) {
+  return normalizeUsageRange(key?.data?.range);
 }
 
 function findMessageConfig(value, depth = 0) {
@@ -48,10 +50,10 @@ function createPluginRuntime({
     return redactSecrets(error?.message || "查询失败", [config.apiKey, client?.cookie]);
   }
 
-  function keyView(cid, state = cache) {
+  function keyView(key, state = cache) {
     if (!config.cchUrl || !config.apiKey) return "请配置 CC Hub";
+    const cid = key.cid;
     const suffix = state.stale ? " · 数据过期" : "";
-    if (cid.endsWith("overview")) return `总览 ${textNumber(state.today?.calls)}次 ${compactMoney(state.today?.costUsd, state.today?.currencyCode)}${suffix}`;
     if (cid.endsWith("quota")) {
       const current = state.quota?.keyCurrent5hUsd;
       const limit = state.quota?.keyLimit5hUsd;
@@ -60,14 +62,26 @@ function createPluginRuntime({
         : "";
       return `配额 ${compactMoney(current)}/${compactMoney(limit)}${percent}${suffix}`;
     }
-    if (cid.endsWith("today")) return `今日 ${textNumber(state.today?.calls)}次 ${compactMoney(state.today?.costUsd, state.today?.currencyCode)}${suffix}`;
-    return `近${config.dateRangeDays}天 ${textNumber(state.summary?.totalRequests)}次 ${compactMoney(state.summary?.totalCost, state.summary?.currencyCode)}${suffix}`;
+    const range = keyRange(key);
+    if (range === "5h") return `用量 5h ${compactMoney(state.quota?.keyCurrent5hUsd, state.quota?.currencyCode)}${suffix}`;
+    const data = range === "1d" ? state.today : state.summaries?.[range];
+    return `用量 ${range} ${textNumber(data?.calls ?? data?.totalRequests)}次 ${compactMoney(data?.costUsd ?? data?.totalCost, data?.currencyCode)}${suffix}`;
+  }
+
+  function requiredRanges() {
+    const ranges = new Set();
+    for (const keys of keysByDevice.values()) {
+      for (const key of keys.values()) {
+        if (key.cid.endsWith("usage")) ranges.add(keyRange(key));
+      }
+    }
+    return USAGE_RANGES.filter((range) => ranges.has(range));
   }
 
   function prepareKey(serialNumber, key) {
     if (!key || !KEY_CIDS.has(key.cid)) return null;
     const width = Number(key.width || key.style?.width || RENDER_WIDTH);
-    const rendered = renderKeyFn(key.cid, cache, config, width);
+    const rendered = renderKeyFn(key.cid, cache, config, width, key.data || {});
     const fingerprintKey = `${serialNumber}:${key.uid || key.cid}`;
     if (renderedFingerprints.get(fingerprintKey) === rendered.fingerprint) return null;
     key.style = {
@@ -77,7 +91,7 @@ function createPluginRuntime({
       showIcon: false,
       showImage: false,
     };
-    key.title = keyView(key.cid);
+    key.title = keyView(key);
     return { serialNumber, key, image: rendered.dataUrl, fingerprintKey, fingerprint: rendered.fingerprint };
   }
 
@@ -131,7 +145,7 @@ function createPluginRuntime({
     const next = normalizedConfig(stored);
     const changed = next.cchUrl !== config.cchUrl
       || next.apiKey !== config.apiKey
-      || next.dateRangeDays !== config.dateRangeDays;
+      || next.refreshIntervalSeconds !== config.refreshIntervalSeconds;
     config = next;
     if (changed || !client) client = config.cchUrl && config.apiKey ? new HubClientClass(config) : null;
     return config;
@@ -145,8 +159,15 @@ function createPluginRuntime({
       return cache;
     }
     try {
-      const data = await client.load();
-      cache = { ...data, fetchedAt: now(), stale: false, error: null };
+      const data = await client.load(requiredRanges());
+      cache = {
+        ...emptyCache(),
+        ...data,
+        summaries: data.summaries || {},
+        fetchedAt: now(),
+        stale: false,
+        error: null,
+      };
       await drawAll();
       return cache;
     } catch (error) {

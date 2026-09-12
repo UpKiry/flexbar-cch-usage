@@ -2,10 +2,7 @@
   <v-container>
     <v-text-field v-model.trim="form.cchUrl" label="CC Hub URL" placeholder="https://your-cc-hub.example.com" :error-messages="urlError" outlined />
     <v-text-field v-model="form.apiKey" label="API Key" type="password" :error-messages="apiKeyError" outlined />
-    <v-row>
-      <v-col cols="6"><v-text-field v-model.number="form.refreshIntervalSeconds" label="刷新间隔（秒）" type="number" min="15" max="3600" :error-messages="intervalError" outlined /></v-col>
-      <v-col cols="6"><v-text-field v-model.number="form.dateRangeDays" label="汇总天数" type="number" min="1" max="90" :error-messages="daysError" outlined /></v-col>
-    </v-row>
+    <v-text-field v-model.number="form.refreshIntervalSeconds" label="刷新间隔（秒）" type="number" min="15" max="3600" :error-messages="intervalError" outlined />
     <v-btn :loading="saving" :disabled="!isValid" color="primary" @click="saveConfig">保存配置</v-btn>
     <v-btn :loading="testing" :disabled="!isValid || saving" color="secondary" class="ml-3" @click="testConnection">测试连接</v-btn>
     <span class="result" :class="{ error: saveError || testError }">{{ saveResult || testResult }}</span>
@@ -13,7 +10,7 @@
 </template>
 
 <script>
-const DEFAULT_CONFIG = { cchUrl: "", apiKey: "", refreshIntervalSeconds: 60, dateRangeDays: 7 };
+const DEFAULT_CONFIG = { cchUrl: "", apiKey: "", refreshIntervalSeconds: 60 };
 
 export default {
   data() {
@@ -27,8 +24,7 @@ export default {
     },
     apiKeyError() { return typeof this.form.apiKey === "string" && this.form.apiKey.trim() ? "" : "请填写 API Key"; },
     intervalError() { const value = Number(this.form.refreshIntervalSeconds); return Number.isFinite(value) && value >= 15 && value <= 3600 ? "" : "请输入 15～3600"; },
-    daysError() { const value = Number(this.form.dateRangeDays); return Number.isFinite(value) && value >= 1 && value <= 90 ? "" : "请输入 1～90"; },
-    isValid() { return !this.urlError && !this.apiKeyError && !this.intervalError && !this.daysError; },
+    isValid() { return !this.urlError && !this.apiKeyError && !this.intervalError; },
   },
   watch: {
   },
@@ -38,7 +34,6 @@ export default {
         cchUrl: String(this.form.cchUrl || "").trim(),
         apiKey: String(this.form.apiKey || ""),
         refreshIntervalSeconds: Number(this.form.refreshIntervalSeconds),
-        dateRangeDays: Number(this.form.dateRangeDays),
       };
     },
     async loadConfig() {

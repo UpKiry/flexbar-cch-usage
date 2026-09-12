@@ -1,13 +1,14 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { createCanvas, GlobalFonts } = require("@napi-rs/canvas");
+const { normalizeUsageRange } = require("./core");
 
 const WIDTH = 240;
 const COMPACT_WIDTH = 180;
 const HEIGHT = 60;
 const FONT_FAMILY = "FlexCJK";
 const FONT_NAME = "SourceHanSansCJK-subset.woff2";
-const REQUIRED_GLYPHS = "总览配额今日近期用量小时数据过期请配置未无限制次调用成本天刷新连接失败需要配置0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzCC Hub∞$%/.-,:·…";
+const REQUIRED_GLYPHS = "配额用量小时数据过期请配置未无限制次调用成本刷新连接失败需要配置h d m0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzCC Hub∞$%/.-,:·…";
 const FONT_PATHS = [
   path.resolve(__dirname, "../resources/fonts", FONT_NAME),
   path.resolve(__dirname, "../com.upkiry.flexbarcchusage.plugin/resources/fonts", FONT_NAME),
@@ -42,43 +43,37 @@ function count(value) {
   return amount === null ? "-" : amount.toLocaleString("en-US");
 }
 
-function metric(cid, state, config) {
+function metric(cid, state, config, keyData = {}) {
   if (!config.cchUrl || !config.apiKey) {
     return { label: "需要配置", value: "请配置 CC Hub", tone: "muted", status: "未配置" };
   }
   const stale = Boolean(state.stale);
   const suffix = stale ? "数据过期" : "";
-  if (cid.endsWith("overview")) {
-    return {
-      label: "用量总览",
-      value: `${count(state.today?.calls)} 次 · ${money(state.today?.costUsd, state.today?.currencyCode)}`,
-      tone: stale ? "stale" : "normal",
-      status: suffix,
-    };
-  }
   if (cid.endsWith("quota")) {
     const current = finite(state.quota?.keyCurrent5hUsd);
     const limit = finite(state.quota?.keyLimit5hUsd);
     const percent = current !== null && limit > 0 ? Math.min(999, current / limit * 100) : null;
     return {
-      label: "5小时配额",
+      label: "配额 · 5h",
       value: `${money(current)}/${money(limit)}${percent === null ? "" : ` ${percent.toFixed(0)}%`}`,
       tone: percent !== null && percent >= 95 ? "critical" : percent !== null && percent >= 80 ? "warning" : stale ? "stale" : "normal",
       status: suffix,
       percent,
     };
   }
-  if (cid.endsWith("today")) {
+  const range = normalizeUsageRange(keyData.range);
+  if (range === "5h") {
     return {
-      label: "今日用量",
-      value: `${count(state.today?.calls)} 次 · ${money(state.today?.costUsd, state.today?.currencyCode)}`,
+      label: "用量 · 5h",
+      value: money(state.quota?.keyCurrent5hUsd, state.quota?.currencyCode),
       tone: stale ? "stale" : "normal",
       status: suffix,
     };
   }
+  const data = range === "1d" ? state.today : state.summaries?.[range];
   return {
-    label: `近${config.dateRangeDays}天用量`,
-    value: `${count(state.summary?.totalRequests)} 次 · ${money(state.summary?.totalCost, state.summary?.currencyCode)}`,
+    label: `用量 · ${range}`,
+    value: `${count(data?.calls ?? data?.totalRequests)} 次 · ${money(data?.costUsd ?? data?.totalCost, data?.currencyCode)}`,
     tone: stale ? "stale" : "normal",
     status: suffix,
   };
@@ -107,12 +102,9 @@ function drawIcon(ctx, cid, x, y, color, scale) {
     ctx.beginPath(); ctx.arc(0, 0, 9, Math.PI * 0.75, Math.PI * 2.25); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(6, -5); ctx.stroke();
     ctx.beginPath(); ctx.arc(0, 0, 2, 0, Math.PI * 2); ctx.fill();
-  } else if (cid.endsWith("today")) {
+  } else if (cid.endsWith("usage")) {
     ctx.strokeRect(-8, -7, 16, 15);
     ctx.beginPath(); ctx.moveTo(-5, -10); ctx.lineTo(-5, -5); ctx.moveTo(5, -10); ctx.lineTo(5, -5); ctx.moveTo(-8, -2); ctx.lineTo(8, -2); ctx.stroke();
-  } else if (cid.endsWith("range")) {
-    ctx.strokeRect(-9, -7, 18, 14);
-    ctx.beginPath(); ctx.moveTo(-5, 3); ctx.lineTo(-1, -1); ctx.lineTo(2, 2); ctx.lineTo(7, -4); ctx.stroke();
   } else {
     ctx.beginPath(); ctx.moveTo(-9, 7); ctx.lineTo(-9, -3); ctx.lineTo(-3, 1); ctx.lineTo(2, -6); ctx.lineTo(9, -1); ctx.stroke();
     ctx.beginPath(); ctx.arc(0, 0, 11, 0, Math.PI * 2); ctx.stroke();
@@ -134,10 +126,10 @@ function fitText(ctx, value, maxWidth, size, weight = "400") {
   return { text: text.length < value.length ? `${text}…` : text, size: 9 };
 }
 
-function renderKey(cid, state = {}, config = {}, requestedWidth = WIDTH) {
+function renderKey(cid, state = {}, config = {}, requestedWidth = WIDTH, keyData = {}) {
   ensureFont();
   const width = Number(requestedWidth) >= 220 ? WIDTH : COMPACT_WIDTH;
-  const view = metric(cid, state, config);
+  const view = metric(cid, state, config, keyData);
   const palette = colors(view.tone);
   const canvas = createCanvas(width, HEIGHT);
   const ctx = canvas.getContext("2d");
