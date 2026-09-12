@@ -143,9 +143,7 @@ function renderKey(cid, state = {}, config = {}, requestedWidth = WIDTH) {
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = "#111923";
   ctx.fillRect(0, 0, width, HEIGHT);
-  ctx.fillStyle = palette.accent;
-  ctx.fillRect(0, 0, 4, HEIGHT);
-  drawIcon(ctx, cid, width >= WIDTH ? 22 : 16, 17, palette.accent, width >= WIDTH ? 1 : 0.82);
+  drawIcon(ctx, cid, width >= WIDTH ? 20 : 15, HEIGHT / 2, palette.accent, width >= WIDTH ? 1 : 0.82);
 
   const left = width >= WIDTH ? 42 : 32;
   const maxText = width - left - 10;
