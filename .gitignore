@@ -9,3 +9,8 @@ package-lock.json
 !/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-darwin-arm64/
 !/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-darwin-arm64/package.json
 !/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-darwin-arm64/skia.darwin-arm64.node
+!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-win32-x64-msvc/
+!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-win32-x64-msvc/icudtl.dat
+!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-win32-x64-msvc/package.json
+!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-win32-x64-msvc/README.md
+!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-win32-x64-msvc/skia.win32-x64-msvc.node

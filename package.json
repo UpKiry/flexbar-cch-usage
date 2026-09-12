@@ -1,8 +1,8 @@
 {
-  "version": "1.1.1",
+  "version": "1.2.0",
   "scripts": {
     "test": "node --test",
-    "build": "rollup -c",
+    "build": "node scripts/sync-native-canvas.cjs && rollup -c",
     "dev": "npm-run-all plugin:unlink plugin:link -p plugin:watch plugin:debug",
     "plugin:watch": "rollup -c -w --watch.onEnd=\"npm run plugin:restart\"",
     "plugin:unlink": "flexcli plugin unlink --uuid com.upkiry.flexbarcchusage --silent",
