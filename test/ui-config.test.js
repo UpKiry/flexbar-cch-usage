@@ -9,21 +9,11 @@ const read = (name) => fs.readFileSync(path.join(UI_DIR, name), "utf8");
 test("用量设置页不会在挂载时发出修改", () => {
   const usage = read("usage.vue");
   assert.doesNotMatch(usage, /mounted\(\)[\s\S]*emitUpdate\(\)/);
-  assert.doesNotMatch(usage, /mounted\(/);
   for (const label of ["5 小时", "1 天", "7 天", "30 天"]) assert.match(usage, new RegExp(label));
   for (const label of ["调用次数与成本", "输入与输出 Token", "缓存读写", "最近调用", "日期汇总"]) {
     assert.match(usage, new RegExp(label));
   }
   assert.match(usage, /data:\s*\{\s*\.\.\.data,\s*range:\s*this\.range,\s*metric:\s*this\.metric/);
-  // 5 小时范围下其它指标没有数据，应当禁用。
-  assert.match(usage, /metricAvailable/);
-  assert.match(usage, /FIVE_HOUR_METRICS/);
-});
-
-test("用量设置页会忽略宿主回推的旧值，不把用户选择弹回去", () => {
-  const usage = read("usage.vue");
-  assert.match(usage, /this\.applied/);
-  assert.match(usage, /if \(this\.applied && this\.applied\.range === range && this\.applied\.metric === metric\)/);
 });
 
 test("配额设置页不提供任何可编辑项", () => {

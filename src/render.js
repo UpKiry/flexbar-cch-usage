@@ -163,8 +163,7 @@ function cachePaint(fingerprint, dataUrl) {
  * 生成按键图片。
  *
  * 视图模型来自 core.buildView，与按键标题共用同一份数据；
- * 这里只负责把视图画成 PNG，并且任何异常都不会向上抛出——
- * 渲染失败最多让按键显示一张空图，不应该让整轮刷新崩掉。
+ * 这里只负责把视图画成 PNG。绘制失败交给运行时隔离和重试。
  */
 function renderKey(cid, state = {}, config = {}, requestedWidth = WIDTH, keyData = {}) {
   const width = Number(requestedWidth) >= 220 ? WIDTH : COMPACT_WIDTH;
@@ -182,12 +181,7 @@ function renderKey(cid, state = {}, config = {}, requestedWidth = WIDTH, keyData
     paintCache.set(fingerprint, cached);
     return { width, height: HEIGHT, fingerprint, dataUrl: cached, view };
   }
-  let dataUrl;
-  try {
-    dataUrl = paintView(view, cid, width);
-  } catch {
-    dataUrl = fallbackImage(width);
-  }
+  const dataUrl = paintView(view, cid, width);
   cachePaint(fingerprint, dataUrl);
   return { width, height: HEIGHT, fingerprint, dataUrl, view };
 }

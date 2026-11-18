@@ -14,7 +14,7 @@ const DEFAULT_CONFIG = { cchUrl: "", apiKey: "", refreshIntervalSeconds: 60 };
 const MIN_INTERVAL = 15;
 const MAX_INTERVAL = 3600;
 // 后端刚重启时可能暂时没有响应，不能让配置页一直转圈。
-const BACKEND_TIMEOUT_MS = 8000;
+const BACKEND_TIMEOUT_MS = 40000;
 
 export default {
   data() {

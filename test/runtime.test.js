@@ -611,3 +611,70 @@ test("完整生命周期：启动、拔插、配置变更、接口失败都不�
   assert.ok(runtime.getState().cache.today.calls > 1);
   runtime.stop();
 });
+
+test("读取宿主配置失败时不会每轮刷新都重试", async () => {
+  const plugin = makePlugin({});
+  let reads = 0;
+  plugin.getConfig = async () => {
+    reads += 1;
+    throw new Error("宿主没响应");
+  };
+  class FakeClient {
+    async load() { return { quota: {}, today: { calls: 1 }, summaries: {} }; }
+  }
+  const runtime = createPluginRuntime({
+    plugin,
+    logger: { error: () => {}, warn: () => {} },
+    HubClientClass: FakeClient,
+    renderKeyFn,
+    setIntervalFn: () => ({}),
+    clearIntervalFn: () => {},
+  });
+  await runtime.refresh("第一次");
+  await runtime.refresh("第二次");
+  await runtime.whenIdle();
+  // 只做了一轮读取（内部重试一次），不能把每轮刷新都拖慢。
+  assert.equal(reads, 2);
+  assert.equal(runtime.getState().cache.error, "请在插件配置中设置 CC Hub URL 和 API Key");
+  runtime.stop();
+});
+
+test("全部接口失败后标记过期并增加退避计数", async () => {
+  const { plugin } = makeRuntime();
+  class FakeClient {
+    async load() { return { summaries: {}, errors: { quota: "服务不可用" } }; }
+  }
+  const runtime = createPluginRuntime({ plugin, logger: { error() {}, warn() {} }, HubClientClass: FakeClient,
+    renderKeyFn, setIntervalFn: () => ({}), clearIntervalFn() {} });
+  await runtime.handlers.alive({ serialNumber: "A", keys: keys() });
+  await runtime.whenIdle();
+  assert.equal(runtime.getState().failures, 1);
+  assert.equal(runtime.getState().cache.stale, true);
+  runtime.stop();
+});
+
+test("更换账号时丢弃旧账号尚未完成的请求", async () => {
+  const first = { cchUrl: "https://first.example", apiKey: "a", refreshIntervalSeconds: 30 };
+  const second = { cchUrl: "https://second.example", apiKey: "b", refreshIntervalSeconds: 30 };
+  const plugin = makePlugin(first);
+  let release;
+  let signalStarted;
+  const started = new Promise((resolve) => { signalStarted = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  class FakeClient {
+    constructor(config) { this.config = config; }
+    async load() {
+      if (this.config.cchUrl === first.cchUrl) { signalStarted(); await gate; return { quota: {}, today: { calls: 99 }, summaries: {} }; }
+      return { quota: {}, today: { calls: 2 }, summaries: {} };
+    }
+  }
+  const runtime = createPluginRuntime({ plugin, logger: { error() {}, warn() {} }, HubClientClass: FakeClient,
+    renderKeyFn, setIntervalFn: () => ({}), clearIntervalFn() {} });
+  void runtime.refresh();
+  await started;
+  await runtime.handlers.configUpdated({ config: second });
+  release();
+  await runtime.whenIdle();
+  assert.equal(runtime.getState().cache.today.calls, 2);
+  runtime.stop();
+});

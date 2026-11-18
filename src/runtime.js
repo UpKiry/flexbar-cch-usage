@@ -33,6 +33,8 @@ const MAX_BACKOFF_FACTOR = 8;
 const ERROR_LOG_INTERVAL_MS = 60_000;
 // 定期从宿主复查配置的间隔。
 const CONFIG_RECHECK_MS = 5 * 60_000;
+// 读取宿主配置失败后的重试间隔。
+const CONFIG_RETRY_MS = 30_000;
 
 function emptyCache() {
   return {
@@ -181,7 +183,7 @@ function createPluginRuntime({
   let refreshTimer = null;
   let configPromise = null;
   let configLoaded = false;
-  let configReadAt = 0;
+  let configNextReadAt = 0;
   let backupRestoreAttempted = false;
   let failures = 0;
   let lastFailureAt = 0;
@@ -228,12 +230,12 @@ function createPluginRuntime({
 
   async function readStoredConfig() {
     let lastError;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         return await plugin.getConfig();
       } catch (error) {
         lastError = error;
-        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+        if (attempt < 1) await new Promise((resolve) => setTimeout(resolve, 250));
       }
     }
     throw lastError || new Error("无法读取插件配置");
@@ -250,16 +252,14 @@ function createPluginRuntime({
       applyConfig(normalizedConfig(storedConfig));
       return Promise.resolve(config);
     }
-    const needsRead = !configLoaded
-      || (configReadAt && now() - configReadAt > CONFIG_RECHECK_MS);
-    if (!needsRead) return Promise.resolve(config);
+    if (now() < configNextReadAt) return Promise.resolve(config);
     if (configPromise) return configPromise;
-    configReadAt = now();
     // 读取期间可能已经收到更新的配置，回来时必须核对版本，否则旧配置会覆盖新配置。
     const version = configVersion;
     configPromise = readStoredConfig()
       .then((stored) => {
         configLoaded = true;
+        configNextReadAt = now() + CONFIG_RECHECK_MS;
         if (version !== configVersion) return config;
         const next = normalizedConfig(stored);
         const backup = readConfigBackup(configStorePath);
@@ -278,6 +278,8 @@ function createPluginRuntime({
         return config;
       })
       .catch((error) => {
+        // 读失败时不要每轮刷新都去重试，那会把每轮刷新都拖慢十几秒。
+        configNextReadAt = now() + CONFIG_RETRY_MS;
         logger.warn(`读取 CC Hub 插件配置失败，将保留当前配置并稍后重试：${safeError(error)}`);
         return config;
       })
@@ -320,11 +322,10 @@ function createPluginRuntime({
     }
     device.keys = keys;
     if (changed) {
-      // 代次变化会让在途绘制作废，避免旧按键的数据画到新按键上。
+      // 代次变化会让在途绘制作废，所有保留的按键也需要重新排队。
       device.generation += 1;
-      for (const id of previous.keys()) {
-        if (!keys.has(id)) desiredSignatures.delete(`${device.serial}:${id}`);
-      }
+      pending.delete(device.serial);
+      forgetSignatures(device.serial);
     }
     return changed;
   }
@@ -378,19 +379,22 @@ function createPluginRuntime({
 
   function applyResult(result) {
     const errors = result?.errors || {};
-    const fresh = {};
+    const fresh = { ...cache.fresh };
     const next = { ...cache, summaries: { ...(cache.summaries || {}) } };
-    const mark = (slice) => { fresh[slice] = !errors[slice]; };
+    const mark = (slice, received) => {
+      if (errors[slice]) fresh[slice] = false;
+      else if (received) fresh[slice] = true;
+    };
 
     if (result?.quota !== undefined) next.quota = result.quota;
-    mark("quota");
+    mark("quota", result?.quota !== undefined);
 
     if (result?.today !== undefined) next.today = result.today;
-    mark("today");
+    mark("today", result?.today !== undefined);
 
     for (const range of ["1d", "7d", "1m"]) {
       if (result?.summaries?.[range] !== undefined) next.summaries[range] = result.summaries[range];
-      mark(range);
+      mark(range, result?.summaries?.[range] !== undefined);
     }
 
     if (result?.recentLogs !== undefined) {
@@ -399,7 +403,8 @@ function createPluginRuntime({
       next.recentTruncated = Boolean(result.recentTruncated);
     }
     next.recentError = result?.recentError || null;
-    mark("recent");
+    mark("recent", result?.recentLogs !== undefined);
+    if (result?.recentError) fresh.recent = false;
 
     next.fresh = fresh;
     next.errors = errors;
@@ -418,15 +423,28 @@ function createPluginRuntime({
     }
     const plan = requestPlan();
     const planSignature = JSON.stringify(plan);
+    const refreshClient = client;
     try {
-      const result = await client.load(plan.ranges, plan.options);
+      const result = await refreshClient.load(plan.ranges, plan.options);
+      if (client !== refreshClient) return cache;
       applyResult(result);
-      failures = 0;
+      const errorCount = Object.keys(result?.errors || {}).length;
+      const successes = Number(result?.quota !== undefined) + Number(result?.today !== undefined)
+        + Object.keys(result?.summaries || {}).length + Number(result?.recentLogs !== undefined);
+      if (errorCount && !successes) {
+        failures += 1;
+        lastFailureAt = now();
+        cache.stale = true;
+        cache.error = "CC Hub 数据查询失败";
+      } else {
+        failures = 0;
+      }
       const problems = Array.isArray(result?.problems) ? result.problems : [];
       if (problems.length) {
         logError(`CC Hub 返回了部分异常字段：${problems.slice(0, 3).join("；")}`);
       }
     } catch (error) {
+      if (client !== refreshClient) return cache;
       failures += 1;
       lastFailureAt = now();
       cache = { ...cache, stale: true, error: safeError(error) };
@@ -534,7 +552,9 @@ function createPluginRuntime({
     if (!device || device.generation !== update.generation) return;
     try {
       await withTimeout(plugin.draw(update.serial, update.key, "base64", update.image), drawTimeoutMs);
-      confirmedSignatures.set(update.id, update.signature);
+      if (devices.get(update.serial) === device && device.connected && device.generation === update.generation) {
+        confirmedSignatures.set(update.id, update.signature);
+      }
     } catch (error) {
       // 失败时把期望值清掉，下一轮会重试。
       if (desiredSignatures.get(update.id) === update.signature) {
@@ -639,7 +659,13 @@ function createPluginRuntime({
       if (!key || !KEY_CIDS.has(key.cid)) return { status: "error", message: "未知按键" };
       const serial = payload?.serialNumber;
       if (serial) {
-        deviceFor(serial).keys.set(keyIdentifier(key), key);
+        const device = deviceFor(serial);
+        if (!device.connected) {
+          device.connected = true;
+          device.generation += 1;
+          forgetSignatures(serial);
+        }
+        device.keys.set(keyIdentifier(key), key);
       }
       void refresh("点击刷新");
       return { status: "success", message: "正在刷新" };
@@ -647,7 +673,12 @@ function createPluginRuntime({
 
     /** 宿主配置变更。 */
     async configUpdated(payload) {
-      const storedConfig = payload?.config || payload?.data?.config || {};
+      const storedConfig = payload?.config || payload?.data?.config || findMessageConfig(payload);
+      if (!storedConfig) {
+        configNextReadAt = 0;
+        void refresh("配置更新");
+        return { status: "success" };
+      }
       const next = normalizedConfig(storedConfig);
       writeConfigBackup(configStorePath, next);
       const { identityChanged } = applyConfig(next);

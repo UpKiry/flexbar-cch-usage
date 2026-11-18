@@ -470,7 +470,7 @@ function quotaView(state = {}, quota = {}) {
   const disabled = quota.keyIsEnabled === false || quota.userIsEnabled === false;
   return {
     label: "配额 · 5 小时",
-    value: `${displayMoney(current, quota.currencyCode)}/${displayLimit(limit, quota.currencyCode)}${percent === null ? "" : ` ${percent.toFixed(0)}%`}`,
+    value: `${displayMoney(current, quota.currencyCode)}/${displayLimit(quota.keyLimit5hUsd, quota.currencyCode)}${percent === null ? "" : ` ${percent.toFixed(0)}%`}`,
     tone: disabled || (percent !== null && percent >= 95)
       ? "critical"
       : percent !== null && percent >= 80
@@ -533,7 +533,10 @@ function usageView(state = {}, range = "1d", metric = "callsCost") {
     };
   }
   const { slices, data } = usageSourceFor(state, range);
-  const stale = sliceStale(state, slices);
+  const relevantSlices = range === "1d" && slices.length > 1
+    ? (metric === "cache" ? ["1d"] : ["today"])
+    : slices;
+  const stale = sliceStale(state, relevantSlices);
   const metrics = aggregateUsageMetricsFrom(data);
   const suffix = stale ? "数据过期" : "";
   if (metric === "tokens") {
