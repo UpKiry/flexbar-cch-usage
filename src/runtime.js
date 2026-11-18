@@ -2,11 +2,11 @@ const fs = require("node:fs");
 const path = require("node:path");
 const {
   USAGE_RANGES,
-  number,
-  textNumber,
-  compactMoney,
-  compactAmount,
+  buildView,
+  fingerprintFor,
+  viewTitle,
   normalizedConfig,
+  hasConfig,
   normalizeMetric,
   normalizeUsageRange,
   aggregateRecentSummary,
@@ -23,6 +23,17 @@ const KEY_CIDS = new Set([
 const USAGE_METRICS = new Set(["callsCost", "tokens", "cache", "recent", "summary"]);
 const QUOTA_METRIC = "quotaStatus";
 
+// 每个时间范围对应多少天的窗口，供"最近调用"指标使用。
+const RANGE_DAYS = { "5h": 1, "1d": 1, "7d": 7, "1m": 30 };
+// 单次绘制的超时，防止宿主无响应时绘制队列被永久堵死。
+const DRAW_TIMEOUT_MS = 8_000;
+// 连续失败时的最大退避倍数。
+const MAX_BACKOFF_FACTOR = 8;
+// 相同错误日志的最小间隔，避免长时间运行时刷屏。
+const ERROR_LOG_INTERVAL_MS = 60_000;
+// 定期从宿主复查配置的间隔。
+const CONFIG_RECHECK_MS = 5 * 60_000;
+
 function emptyCache() {
   return {
     quota: null,
@@ -31,9 +42,12 @@ function emptyCache() {
     recentLogs: null,
     recentSummary: null,
     recentError: null,
+    recentTruncated: false,
     fetchedAt: null,
     stale: true,
     error: null,
+    errors: {},
+    fresh: {},
   };
 }
 
@@ -46,6 +60,10 @@ function keyMetric(key) {
   if (key?.cid?.endsWith("quota")) return QUOTA_METRIC;
   const metric = normalizeMetric(key?.data?.metric);
   return USAGE_METRICS.has(metric) ? metric : "callsCost";
+}
+
+function keyIdentifier(key) {
+  return String(key?.uid || key?.cid || "");
 }
 
 function summarizeRecentLogs(value) {
@@ -61,11 +79,6 @@ function findMessageConfig(value, depth = 0) {
     if (found) return found;
   }
   return undefined;
-}
-
-function hasConfig(value) {
-  return Boolean(value && typeof value.cchUrl === "string" && value.cchUrl.trim()
-    && typeof value.apiKey === "string" && value.apiKey.trim());
 }
 
 function readConfigBackup(configStorePath) {
@@ -91,6 +104,56 @@ function writeConfigBackup(configStorePath, value) {
   }
 }
 
+/**
+ * 修补 SDK 的重连回调。
+ *
+ * 1. SDK 用 `setTimeout(this.start, 5000)` 重连，this 会丢失；
+ * 2. 'close' 与 'error' 会各排一个定时器，一次断线可能建出两条 WebSocket；
+ * 3. 旧连接被丢弃但没有关闭，会泄漏。
+ */
+function hardenTransport(transport, logger) {
+  if (!transport || typeof transport.start !== "function") return false;
+  if (transport.start.__flexbarHardened) return false;
+  const original = transport.start.bind(transport);
+  const hardened = function hardenedStart(...args) {
+    const socket = transport.ws;
+    // 已经有一个连接或正在连接时不再重复建立。
+    if (socket && (socket.readyState === 0 || socket.readyState === 1)) return undefined;
+    try {
+      return original(...args);
+    } catch (error) {
+      logger?.error?.(`插件重连失败：${error?.message || error}`);
+      return undefined;
+    }
+  };
+  Object.defineProperty(hardened, "__flexbarHardened", { value: true });
+  // 保留旧标记，兼容既有测试与外部集成。
+  Object.defineProperty(hardened, "__flexbarBound", { value: true });
+  transport.start = hardened;
+  return true;
+}
+
+function withTimeout(promise, milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) return Promise.resolve(promise);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("绘制超时")), milliseconds);
+    if (typeof timer.unref === "function") timer.unref();
+    Promise.resolve(promise).then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+/**
+ * 插件运行时。
+ *
+ * 职责划分：
+ * - 事件处理只做"记账 + 触发"，立刻返回，绝不在宿主回调里等待网络；
+ * - 一台设备一份状态，按键集合变化时递增代次，丢弃过期绘制；
+ * - 刷新失败按分片隔离，坏掉的接口不会连累其它按键；
+ * - 定时刷新带退避，长时间运行不会把 CC Hub 打满。
+ */
 function createPluginRuntime({
   plugin,
   logger,
@@ -100,159 +163,64 @@ function createPluginRuntime({
   clearIntervalFn = clearInterval,
   now = () => Date.now(),
   configStorePath,
+  drawTimeoutMs = DRAW_TIMEOUT_MS,
 } = {}) {
-  const keysByDevice = new Map();
-  const renderedFingerprints = new Map();
-  const pendingFingerprints = new Map();
-  const drawQueues = new Map();
-  const deviceGenerations = new Map();
+  const devices = new Map();
+  const drawnSignatures = new Map();
+  const pending = new Map();
+  const draining = new Set();
   let config = {};
   let client;
   let cache = emptyCache();
-  let refreshPromise;
-  let refreshTimer;
-  let configUpdatePromise = Promise.resolve();
+  let refreshPromise = null;
+  let queuedRefresh = null;
+  let configVersion = 0;
+  let refreshTimer = null;
+  let configPromise = null;
+  let configLoaded = false;
+  let configReadAt = 0;
+  let backupRestoreAttempted = false;
+  let failures = 0;
+  let lastFailureAt = 0;
+  let lastErrorSignature = "";
+  let lastErrorAt = 0;
   let registered = false;
   let started = false;
-  let backupRestoreAttempted = false;
 
   function safeError(error) {
     return redactSecrets(error?.message || "查询失败", [config.apiKey, client?.cookie]);
   }
 
-  function keyView(key, state = cache) {
-    if (!config.cchUrl || !config.apiKey) return "请配置 CC Hub";
-    const cid = key.cid;
-    const suffix = state.stale ? " · 数据过期" : "";
-    if (cid.endsWith("quota")) {
-      const current = state.quota?.keyCurrent5hUsd;
-      const limit = state.quota?.keyLimit5hUsd;
-      const percent = number(current) !== null && number(limit) > 0
-        ? ` ${Math.min(999, current / limit * 100).toFixed(0)}%`
-        : "";
-      return `配额 5 小时 ${compactAmount(current)}/${compactMoney(limit)}${percent}${suffix}`;
-    }
-    const range = keyRange(key);
-    const metric = keyMetric(key);
-    if (metric === "recent") {
-      const summary = state.recentSummary || summarizeRecentLogs(state.recentLogs);
-      const latestModel = summary.lastModel || summary.latest?.model || summary.latest?.billingModel;
-      const recentCount = summary.count ?? summary.totalRequests ?? 0;
-      return `最近 ${textNumber(recentCount)}次${latestModel ? ` ${latestModel}` : ""}${suffix}`;
-    }
-    if (range === "5h") {
-      if (metric === "callsCost") {
-        return `用量 5 小时 ${compactAmount(state.quota?.keyCurrent5hUsd, state.quota?.currencyCode)}${suffix}`;
-      }
-      const unavailable = metric === "cache" ? "缓存暂无" : metric === "tokens" ? "Token暂无" : "汇总暂无";
-      return `用量 5 小时 ${unavailable}${suffix}`;
-    }
-    const data = range === "1d" ? (state.summaries?.["1d"] || state.today) : state.summaries?.[range];
-    const rangeLabel = { "1d": "1 天", "7d": "7 天", "1m": "30 天" }[range] || range;
-    if (metric === "tokens") {
-      const input = data?.inputTokens ?? data?.totalInputTokens;
-      const output = data?.outputTokens ?? data?.totalOutputTokens;
-      if (input === undefined && output === undefined && data?.totalTokens !== undefined) {
-        return `用量 ${rangeLabel} ${textNumber(data.totalTokens)} Token${suffix}`;
-      }
-      return `用量 ${rangeLabel} ${textNumber(input)}+${textNumber(output)} Token${suffix}`;
-    }
-    if (metric === "cache") {
-      const read = data?.cacheReadTokens ?? data?.totalCacheReadTokens;
-      const created = data?.cacheCreationTokens ?? data?.totalCacheCreationTokens;
-      return `缓存 ${rangeLabel} ${textNumber(read)}读/${textNumber(created)}写${suffix}`;
-    }
-    return `用量 ${rangeLabel} ${textNumber(data?.calls ?? data?.totalRequests)}次 ${compactAmount(data?.costUsd ?? data?.totalCost, data?.currencyCode)}${suffix}`;
+  function logError(message) {
+    const text = String(message || "");
+    const stamp = now();
+    if (text === lastErrorSignature && stamp - lastErrorAt < ERROR_LOG_INTERVAL_MS) return;
+    lastErrorSignature = text;
+    lastErrorAt = stamp;
+    logger.error(text);
   }
 
-  function requiredRanges() {
-    const ranges = new Set();
-    for (const keys of keysByDevice.values()) {
-      for (const key of keys.values()) {
-        // 最近调用由 usage-logs 接口单独提供，不需要额外的日期汇总请求。
-        if (keyMetric(key) === "recent") continue;
-        ranges.add(keyRange(key));
-      }
+  // -------------------------------------------------------------------------
+  // 配置
+  // -------------------------------------------------------------------------
+
+  function applyConfig(next, options = {}) {
+    // 后台读取宿主配置的途中可能已经收到更新的配置，这时丢弃旧结果。
+    if (options.expectedVersion !== undefined && options.expectedVersion !== configVersion) {
+      return { changed: false, identityChanged: false };
     }
-    return USAGE_RANGES.filter((range) => ranges.has(range));
-  }
-
-  function requestOptions() {
-    let includeRecentLogs = false;
-    let includeDailySummary = false;
-    for (const keys of keysByDevice.values()) {
-      for (const key of keys.values()) {
-        if (keyMetric(key) === "recent") includeRecentLogs = true;
-        if (keyRange(key) !== "5h" && ["cache", "summary"].includes(keyMetric(key))) {
-          includeDailySummary = true;
-        }
-      }
+    const identityChanged = next.cchUrl !== config.cchUrl || next.apiKey !== config.apiKey;
+    const changed = identityChanged || next.refreshIntervalSeconds !== config.refreshIntervalSeconds;
+    config = next;
+    configVersion += 1;
+    if (changed || !client) {
+      client = config.cchUrl && config.apiKey ? new HubClientClass(config) : null;
     }
-    return {
-      includeRecentLogs,
-      recentLimit: 8,
-      recentDays: 1,
-      ...(includeDailySummary ? { includeDailySummary: true } : {}),
-    };
-  }
-
-  function prepareKey(serialNumber, key) {
-    if (!key || !KEY_CIDS.has(key.cid)) return null;
-    const width = Number(key.width || key.style?.width || RENDER_WIDTH);
-    const rendered = renderKeyFn(key.cid, cache, config, width, key.data || {});
-    const fingerprintKey = `${serialNumber}:${key.uid || key.cid}`;
-    if (renderedFingerprints.get(fingerprintKey) === rendered.fingerprint
-      || pendingFingerprints.get(fingerprintKey) === rendered.fingerprint) return null;
-    key.style = {
-      ...(key.style || {}),
-      width: rendered.width,
-      showTitle: false,
-      showIcon: false,
-      showImage: true,
-    };
-    key.title = keyView(key);
-    pendingFingerprints.set(fingerprintKey, rendered.fingerprint);
-    return {
-      serialNumber,
-      generation: deviceGenerations.get(serialNumber) || 0,
-      key,
-      image: rendered.dataUrl,
-      fingerprintKey,
-      fingerprint: rendered.fingerprint,
-    };
-  }
-
-  function sendDraws(updates) {
-    return Promise.all(updates.map((update) => {
-      const previous = drawQueues.get(update.serialNumber) || Promise.resolve();
-      const next = previous.catch(() => {}).then(async () => {
-        if (!keysByDevice.has(update.serialNumber)
-          || (deviceGenerations.get(update.serialNumber) || 0) !== update.generation) {
-          pendingFingerprints.delete(update.fingerprintKey);
-          return;
-        }
-        try {
-          await plugin.draw(update.serialNumber, update.key, "base64", update.image);
-          renderedFingerprints.set(update.fingerprintKey, update.fingerprint);
-        } catch (error) {
-          pendingFingerprints.delete(update.fingerprintKey);
-          logger.error("更新 Flexbar 按键失败", error);
-        }
-      });
-      drawQueues.set(update.serialNumber, next);
-      return next;
-    }));
-  }
-
-  function drawAll() {
-    const updates = [];
-    for (const [serial, keys] of keysByDevice) {
-      for (const key of keys.values()) {
-        const update = prepareKey(serial, key);
-        if (update) updates.push(update);
-      }
+    if (changed) {
+      writeConfigBackup(configStorePath, config);
+      scheduleTimer();
     }
-    return sendDraws(updates);
+    return { changed, identityChanged };
   }
 
   async function readStoredConfig() {
@@ -268,149 +236,416 @@ function createPluginRuntime({
     throw lastError || new Error("无法读取插件配置");
   }
 
-  async function loadConfig(storedOverride) {
-    let stored = storedOverride;
-    if (stored === undefined) {
-      try {
-        stored = await readStoredConfig();
-      } catch (error) {
+  /**
+   * 读取宿主配置。
+   *
+   * 旧实现每轮刷新都调用一次 plugin.getConfig()，既多一次宿主 IPC，
+   * 又把配置文件反复写盘。现在只在首次、配置变更事件和定期复查时读取。
+   */
+  function ensureConfig(storedConfig) {
+    if (storedConfig !== undefined) {
+      applyConfig(normalizedConfig(storedConfig));
+      return Promise.resolve(config);
+    }
+    const needsRead = !configLoaded
+      || (configReadAt && now() - configReadAt > CONFIG_RECHECK_MS);
+    if (!needsRead) return Promise.resolve(config);
+    if (configPromise) return configPromise;
+    configReadAt = now();
+    configPromise = readStoredConfig()
+      .then((stored) => {
+        configLoaded = true;
+        const next = normalizedConfig(stored);
+        const backup = readConfigBackup(configStorePath);
+        if (!hasConfig(next) && backup) {
+          // 宿主配置被重装清空时用本地副本恢复。
+          if (!backupRestoreAttempted && typeof plugin.setConfig === "function") {
+            backupRestoreAttempted = true;
+            plugin.setConfig(backup).catch((error) => {
+              logger.warn(`恢复插件配置失败：${safeError(error)}`);
+            });
+          }
+          applyConfig(backup);
+          return config;
+        }
+        applyConfig(next);
+        return config;
+      })
+      .catch((error) => {
         logger.warn(`读取 CC Hub 插件配置失败，将保留当前配置并稍后重试：${safeError(error)}`);
         return config;
+      })
+      .finally(() => {
+        configPromise = null;
+      });
+    return configPromise;
+  }
+
+  // -------------------------------------------------------------------------
+  // 设备与按键
+  // -------------------------------------------------------------------------
+
+  function deviceFor(serial) {
+    if (!devices.has(serial)) {
+      devices.set(serial, { serial, generation: 0, keys: new Map(), connected: true });
+    }
+    return devices.get(serial);
+  }
+
+  function forgetSignatures(serial) {
+    const prefix = `${serial}:`;
+    for (const id of drawnSignatures.keys()) {
+      if (id.startsWith(prefix)) drawnSignatures.delete(id);
+    }
+  }
+
+  function applyKeys(device, keys) {
+    const previous = device.keys;
+    let changed = previous.size !== keys.size;
+    if (!changed) {
+      for (const id of keys.keys()) {
+        if (!previous.has(id)) {
+          changed = true;
+          break;
+        }
       }
     }
-    let next = normalizedConfig(stored);
-    const backup = readConfigBackup(configStorePath);
-    if (!hasConfig(next) && backup) {
-      next = backup;
-      if (!backupRestoreAttempted && typeof plugin.setConfig === "function") {
-        backupRestoreAttempted = true;
-        plugin.setConfig(next).catch((error) => logger.warn(`恢复插件配置失败：${safeError(error)}`));
+    device.keys = keys;
+    if (changed) {
+      // 代次变化会让在途绘制作废，避免旧按键的数据画到新按键上。
+      device.generation += 1;
+      for (const id of previous.keys()) {
+        if (!keys.has(id)) drawnSignatures.delete(`${device.serial}:${id}`);
       }
     }
-    if (hasConfig(next)) writeConfigBackup(configStorePath, next);
-    const changed = next.cchUrl !== config.cchUrl
-      || next.apiKey !== config.apiKey
-      || next.refreshIntervalSeconds !== config.refreshIntervalSeconds;
-    config = next;
-    if (changed || !client) client = config.cchUrl && config.apiKey ? new HubClientClass(config) : null;
-    return config;
+    return changed;
+  }
+
+  function markDisconnected(serial) {
+    const device = devices.get(serial);
+    if (!device) return;
+    device.generation += 1;
+    device.connected = false;
+    // 保留按键列表：宿主不一定在重新插上后重发按键列表。
+    pending.delete(serial);
+    forgetSignatures(serial);
+  }
+
+  function connectedDevices() {
+    return [...devices.values()].filter((device) => device.connected && device.keys.size > 0);
+  }
+
+  /** 本轮需要哪些时间范围和哪些附加数据。 */
+  function requestPlan() {
+    const ranges = new Set();
+    const metrics = new Set();
+    let recentDays = 1;
+    for (const device of connectedDevices()) {
+      for (const key of device.keys.values()) {
+        const metric = keyMetric(key);
+        metrics.add(metric);
+        const range = keyRange(key);
+        if (metric === "recent") {
+          recentDays = Math.max(recentDays, RANGE_DAYS[range] || 1);
+          continue;
+        }
+        ranges.add(range);
+      }
+    }
+    const options = {
+      includeRecentLogs: metrics.has("recent"),
+      recentLimit: 8,
+      recentDays,
+    };
+    // 缓存和汇总指标依赖 stats-summary，1 天范围需要额外取一次。
+    if (ranges.has("1d") && (metrics.has("cache") || metrics.has("summary"))) {
+      options.includeDailySummary = true;
+    }
+    return { ranges: USAGE_RANGES.filter((range) => ranges.has(range)), options };
+  }
+
+  // -------------------------------------------------------------------------
+  // 抓取与合并
+  // -------------------------------------------------------------------------
+
+  function applyResult(result) {
+    const errors = result?.errors || {};
+    const fresh = {};
+    const next = { ...cache, summaries: { ...(cache.summaries || {}) } };
+    const mark = (slice) => { fresh[slice] = !errors[slice]; };
+
+    if (result?.quota !== undefined) next.quota = result.quota;
+    mark("quota");
+
+    if (result?.today !== undefined) next.today = result.today;
+    mark("today");
+
+    for (const range of ["1d", "7d", "1m"]) {
+      if (result?.summaries?.[range] !== undefined) next.summaries[range] = result.summaries[range];
+      mark(range);
+    }
+
+    if (result?.recentLogs !== undefined) {
+      next.recentLogs = result.recentLogs;
+      next.recentSummary = summarizeRecentLogs(result.recentLogs);
+      next.recentTruncated = Boolean(result.recentTruncated);
+    }
+    next.recentError = result?.recentError || null;
+    mark("recent");
+
+    next.fresh = fresh;
+    next.errors = errors;
+    next.fetchedAt = now();
+    next.stale = false;
+    next.error = null;
+    cache = next;
   }
 
   async function performRefresh(reason, storedConfig) {
-    await loadConfig(storedConfig);
+    await ensureConfig(storedConfig);
     if (!client) {
       cache = { ...cache, stale: true, error: "请在插件配置中设置 CC Hub URL 和 API Key" };
       await drawAll();
       return cache;
     }
     try {
-      const ranges = requiredRanges();
-      const options = requestOptions();
-      // 第二个参数是可选的，旧版测试客户端/插件仍可只接收 ranges。
-      const data = await client.load(ranges, options);
-      const recentUnavailable = options.includeRecentLogs && data.recentError;
-      cache = {
-        ...emptyCache(),
-        ...data,
-        summaries: data.summaries || {},
-        recentLogs: data.recentLogs || (recentUnavailable ? cache.recentLogs : null),
-        recentSummary: data.recentSummary
-          || (recentUnavailable ? cache.recentSummary : summarizeRecentLogs(data.recentLogs)),
-        recentError: data.recentError || null,
-        fetchedAt: now(),
-        stale: false,
-        error: null,
-      };
-      await drawAll();
-      return cache;
+      const plan = requestPlan();
+      const result = await client.load(plan.ranges, plan.options);
+      applyResult(result);
+      failures = 0;
+      const problems = Array.isArray(result?.problems) ? result.problems : [];
+      if (problems.length) {
+        logError(`CC Hub 返回了部分异常字段：${problems.slice(0, 3).join("；")}`);
+      }
     } catch (error) {
+      failures += 1;
+      lastFailureAt = now();
       cache = { ...cache, stale: true, error: safeError(error) };
-      logger.error(`CC Hub ${reason}失败：${cache.error}`);
-      await drawAll();
-      return cache;
+      logError(`CC Hub ${reason}失败：${cache.error}`);
     }
+    await drawAll();
+    return cache;
   }
 
+  /**
+   * 触发一轮刷新。同一时刻只跑一轮，重复触发直接复用进行中的那一轮。
+   * 返回的 Promise 永远不会 reject，避免宿主事件回调里出现未捕获异常。
+   */
   function refresh(reason = "定时刷新", storedConfig) {
     if (refreshPromise) return refreshPromise;
-    refreshPromise = performRefresh(reason, storedConfig).finally(() => {
-      refreshPromise = null;
-    });
+    refreshPromise = performRefresh(reason, storedConfig)
+      .catch((error) => {
+        logError(`刷新失败：${safeError(error)}`);
+        return cache;
+      })
+      .finally(() => {
+        refreshPromise = null;
+      });
     return refreshPromise;
   }
 
-  function restartTimer() {
-    if (refreshTimer) clearIntervalFn(refreshTimer);
-    refreshTimer = setIntervalFn(() => refresh(), config.refreshIntervalSeconds * 1000);
+  function whenIdle() {
+    return refreshPromise || Promise.resolve();
   }
 
-  function forgetDevice(serialNumber) {
-    deviceGenerations.set(serialNumber, (deviceGenerations.get(serialNumber) || 0) + 1);
-    keysByDevice.delete(serialNumber);
-    drawQueues.delete(serialNumber);
-    for (const key of renderedFingerprints.keys()) {
-      if (key.startsWith(`${serialNumber}:`)) {
-        renderedFingerprints.delete(key);
-        pendingFingerprints.delete(key);
+  // -------------------------------------------------------------------------
+  // 绘制
+  // -------------------------------------------------------------------------
+
+  function prepareUpdate(device, key) {
+    const width = Number(key.width || key.style?.width || RENDER_WIDTH);
+    const keyData = key.data || {};
+    let view;
+    try {
+      view = buildView(key.cid, cache, config, keyData);
+    } catch (error) {
+      logError(`生成按键视图失败：${safeError(error)}`);
+      return null;
+    }
+    const signature = fingerprintFor(key.cid, width, view);
+    const id = `${device.serial}:${keyIdentifier(key)}`;
+    if (drawnSignatures.get(id) === signature) return null;
+    const queue = pending.get(device.serial);
+    if (queue && queue.get(id)?.signature === signature) return null;
+
+    let rendered;
+    try {
+      rendered = renderKeyFn(key.cid, cache, config, width, keyData);
+    } catch (error) {
+      logError(`渲染按键失败：${safeError(error)}`);
+      return null;
+    }
+    key.style = {
+      ...(key.style || {}),
+      width: rendered.width,
+      showTitle: false,
+      showIcon: false,
+      showImage: true,
+    };
+    key.title = viewTitle(view);
+    return {
+      id,
+      serial: device.serial,
+      generation: device.generation,
+      key,
+      image: rendered.dataUrl,
+      signature,
+    };
+  }
+
+  async function drawOne(update) {
+    const device = devices.get(update.serial);
+    if (!device || device.generation !== update.generation) return;
+    try {
+      await withTimeout(plugin.draw(update.serial, update.key, "base64", update.image), drawTimeoutMs);
+      drawnSignatures.set(update.id, update.signature);
+    } catch (error) {
+      // 失败时保留旧签名，下一轮会重试。
+      logError(`更新 Flexbar 按键失败：${safeError(error)}`);
+    }
+  }
+
+  async function drainDevice(serial) {
+    if (draining.has(serial)) return;
+    draining.add(serial);
+    try {
+      while (true) {
+        const queue = pending.get(serial);
+        if (!queue || !queue.size) break;
+        const [id, update] = queue.entries().next().value;
+        queue.delete(id);
+        await drawOne(update);
+      }
+    } finally {
+      draining.delete(serial);
+    }
+  }
+
+  function enqueue(update) {
+    const serial = update.serial;
+    if (!pending.has(serial)) pending.set(serial, new Map());
+    pending.get(serial).set(update.id, update);
+    void drainDevice(serial);
+  }
+
+  function drawAll() {
+    for (const device of devices.values()) {
+      if (!device.connected) continue;
+      for (const key of device.keys.values()) {
+        const update = prepareUpdate(device, key);
+        if (update) enqueue(update);
       }
     }
   }
 
+  // -------------------------------------------------------------------------
+  // 定时器
+  // -------------------------------------------------------------------------
+
+  function clearTimer() {
+    if (refreshTimer) clearIntervalFn(refreshTimer);
+    refreshTimer = null;
+  }
+
+  function backoffDelay() {
+    const base = Math.max(15, config.refreshIntervalSeconds || 60) * 1000;
+    if (failures <= 0) return 0;
+    return Math.min(base * MAX_BACKOFF_FACTOR, base * (2 ** Math.min(failures, 3)));
+  }
+
+  function scheduleTimer() {
+    clearTimer();
+    const base = Math.max(15, config.refreshIntervalSeconds || 60) * 1000;
+    refreshTimer = setIntervalFn(() => {
+      // 失败后进入退避，避免接口持续不可用时反复打满。
+      const wait = backoffDelay();
+      if (wait > 0 && now() - lastFailureAt < wait) return;
+      if (!connectedDevices().length) return;
+      void refresh("定时刷新");
+    }, base);
+  }
+
+  // -------------------------------------------------------------------------
+  // 宿主事件
+  // -------------------------------------------------------------------------
+
   const handlers = {
+    /**
+     * 宿主下发按键列表。
+     *
+     * 这里必须立刻返回：宿主会等待处理结果才回复，一个网络往返就能把
+     * 启动流程卡住几十秒。
+     */
     async alive(payload) {
       const serial = payload?.serialNumber;
-      if (!serial) return;
-      forgetDevice(serial);
+      if (!serial) return { status: "success" };
+      const device = deviceFor(serial);
+      device.connected = true;
       const keys = new Map();
       for (const key of payload.keys || []) {
-        if (KEY_CIDS.has(key.cid)) keys.set(key.uid || key.cid, key);
+        if (KEY_CIDS.has(key.cid)) keys.set(keyIdentifier(key), key);
       }
-      keysByDevice.set(serial, keys);
-      await refresh("启动刷新");
-      restartTimer();
+      applyKeys(device, keys);
+      void refresh("启动刷新");
+      return { status: "success" };
     },
 
+    /** 按键点击：立刻回复，数据刷新在后台进行。 */
     async data(payload) {
       const key = payload?.data?.key;
       if (!key || !KEY_CIDS.has(key.cid)) return { status: "error", message: "未知按键" };
       const serial = payload?.serialNumber;
-      if (serial && keysByDevice.has(serial)) {
-        keysByDevice.get(serial).set(key.uid || key.cid, key);
-        renderedFingerprints.delete(`${serial}:${key.uid || key.cid}`);
-        pendingFingerprints.delete(`${serial}:${key.uid || key.cid}`);
+      if (serial) {
+        deviceFor(serial).keys.set(keyIdentifier(key), key);
       }
-      await refresh("点击刷新");
-      return cache.error
-        ? { status: "error", message: cache.error }
-        : { status: "success", message: "已刷新" };
+      void refresh("点击刷新");
+      return { status: "success", message: "正在刷新" };
     },
 
-    configUpdated(payload) {
+    /** 宿主配置变更。 */
+    async configUpdated(payload) {
       const storedConfig = payload?.config || payload?.data?.config || {};
-      writeConfigBackup(configStorePath, storedConfig);
-      const update = configUpdatePromise.then(async () => {
-        if (refreshPromise) await refreshPromise;
-        client = null;
-        cache = emptyCache();
-        renderedFingerprints.clear();
-        await refresh("配置更新", storedConfig);
-        restartTimer();
-      });
-      configUpdatePromise = update.catch(() => {});
-      return update;
-    },
-
-    async deviceStatus(devices) {
-      let connected = false;
-      const list = Array.isArray(devices) ? devices : devices ? [devices] : [];
-      for (const device of list) {
-        const serial = device?.serialNumber || device?.serial;
-        if (device?.status === "disconnected" && serial) forgetDevice(serial);
-        if (device?.status === "connected") connected = true;
+      const next = normalizedConfig(storedConfig);
+      writeConfigBackup(configStorePath, next);
+      const { identityChanged } = applyConfig(next);
+      if (identityChanged) {
+        // 服务端换了，旧数据没有意义，但按键不会因此变空白。
+        cache = { ...emptyCache(), stale: true };
+        forgetSignaturesForAll();
       }
-      if (connected) await refresh("设备连接");
+      void refresh("配置更新", next);
+      return { status: "success" };
     },
 
+    /** 设备插拔。 */
+    async deviceStatus(payload) {
+      const items = Array.isArray(payload) ? payload : payload ? [payload] : [];
+      let reconnected = false;
+      for (const item of items) {
+        const serial = item?.serialNumber || item?.serial;
+        if (!serial) continue;
+        if (item?.status === "disconnected") {
+          markDisconnected(serial);
+        } else if (item?.status === "connected") {
+          const device = devices.get(serial);
+          if (device) {
+            if (!device.connected) {
+              // 重新插上：主机不一定重发按键列表，沿用旧按键重画一次。
+              device.connected = true;
+              device.generation += 1;
+              forgetSignatures(serial);
+              reconnected = true;
+            }
+          } else {
+            deviceFor(serial);
+          }
+        }
+      }
+      if (reconnected) void refresh("设备重连");
+      return { status: "success" };
+    },
+
+    /** 配置页与宿主之间的消息。 */
     async uiMessage(payload) {
       const message = payload?.data?.data && typeof payload.data.data === "object"
         ? { ...payload, ...payload.data, ...payload.data.data }
@@ -418,8 +653,8 @@ function createPluginRuntime({
           ? { ...payload, ...payload.data }
           : payload || {};
       if (message.action === "getConfig") {
-        const current = await loadConfig();
-        return { status: "success", config: { ...current } };
+        await ensureConfig();
+        return { status: "success", config: { ...config } };
       }
       if (message.action === "applyConfig") {
         const nextConfig = normalizedConfig(findMessageConfig(message) || {});
@@ -436,14 +671,20 @@ function createPluginRuntime({
         return { status: "error", message: "请填写 CC Hub URL 和 API Key" };
       }
       try {
+        // 只做一次轻量连通性检查，不再跑完整的一轮抓取。
         const testClient = new HubClientClass(testConfig);
-        await testClient.load();
+        if (typeof testClient.ping === "function") await testClient.ping();
+        else await testClient.load();
         return { status: "success", message: "连接成功" };
       } catch (error) {
         return { status: "error", message: redactSecrets(error?.message || "连接失败", [testConfig.apiKey]) };
       }
     },
   };
+
+  function forgetSignaturesForAll() {
+    drawnSignatures.clear();
+  }
 
   function register() {
     if (registered) return;
@@ -460,33 +701,34 @@ function createPluginRuntime({
     if (!started) {
       // FlexDesigner SDK 1.0.x schedules transport.start as an unbound callback
       // on disconnect, which loses the port and retries ws://localhost:undefined.
-      // Bind it once so device/plugin reconnects do not terminate the backend.
-      if (plugin.transport && typeof plugin.transport.start === "function" && !plugin.transport.start.__flexbarBound) {
-        const boundStart = plugin.transport.start.bind(plugin.transport);
-        Object.defineProperty(boundStart, "__flexbarBound", { value: true });
-        plugin.transport.start = boundStart;
+      hardenTransport(plugin.transport, logger);
+      try {
+        plugin.start();
+      } catch (error) {
+        logger.error(`插件启动失败：${error?.message || error}`);
       }
-      plugin.start();
       started = true;
     }
+    void ensureConfig();
+    scheduleTimer();
   }
 
   function stop() {
-    if (refreshTimer) clearIntervalFn(refreshTimer);
-    refreshTimer = null;
+    clearTimer();
   }
 
   function getState() {
     return {
       config: { ...config, apiKey: config.apiKey ? "[已配置]" : "" },
       cache: { ...cache },
-      deviceCount: keysByDevice.size,
-      fingerprintCount: renderedFingerprints.size,
+      deviceCount: devices.size,
+      fingerprintCount: drawnSignatures.size,
       refreshing: Boolean(refreshPromise),
+      failures,
     };
   }
 
-  return { start, stop, register, refresh, handlers, getState };
+  return { start, stop, register, refresh, whenIdle, handlers, getState };
 }
 
 module.exports = {
@@ -497,4 +739,5 @@ module.exports = {
   findMessageConfig,
   keyMetric,
   summarizeRecentLogs,
+  hardenTransport,
 };

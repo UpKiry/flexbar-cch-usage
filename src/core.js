@@ -1,14 +1,50 @@
+/**
+ * 纯逻辑层：配置归一化、接口数据归一化和按键视图模型。
+ *
+ * 这里不允许出现任何 I/O、计时器或宿主 API 调用，保证可以在没有
+ * FlexDesigner 运行时的环境里直接单元测试。
+ */
+
 const USAGE_RANGES = ["5h", "1d", "7d", "1m"];
 const USAGE_METRICS = ["callsCost", "tokens", "cache", "recent", "summary"];
 const DEFAULTS = { refreshIntervalSeconds: 60, usageRange: "1d" };
+const QUOTA_CID_SUFFIX = "quota";
+const DEFAULT_TIME_ZONE = "Asia/Shanghai";
 
-function localDate(date = new Date()) {
-  return new Intl.DateTimeFormat("sv-SE", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date);
+function isObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * 解析宿主所在时区。CC Hub 的“今天”按用户本地日历计算，
+ * 硬编码 Asia/Shanghai 会让其他时区的用户每天提前或滞后 8 小时切换。
+ */
+function resolveTimeZone() {
+  try {
+    const resolved = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (typeof resolved === "string" && resolved) return resolved;
+  } catch {
+    // Intl 不可用时退回默认时区。
+  }
+  return DEFAULT_TIME_ZONE;
+}
+
+function localDate(date = new Date(), timeZone = resolveTimeZone()) {
+  try {
+    return new Intl.DateTimeFormat("sv-SE", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(date);
+  } catch {
+    return new Intl.DateTimeFormat("sv-SE", {
+      timeZone: DEFAULT_TIME_ZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(date);
+  }
 }
 
 function number(value) {
@@ -41,6 +77,27 @@ function compactAmount(value, currency = "USD") {
   return currency === "USD" || !currency ? `$${value.toFixed(2)}` : `${value.toFixed(2)} ${currency}`;
 }
 
+function safeCurrency(value) {
+  return typeof value === "string" && /^[A-Za-z]{1,6}$/.test(value) ? value : null;
+}
+
+/** 按键上显示用的金额：USD 用 $ 前缀，其他币种用代码前缀。 */
+function displayMoney(value, currency = "USD") {
+  if (number(value) === null) return "-";
+  const unit = safeCurrency(currency) || "USD";
+  return unit === "USD" ? `$${value.toFixed(2)}` : `${unit} ${value.toFixed(2)}`;
+}
+
+/** 上限为空表示“未设置限制”，与“金额未知”区分开。 */
+function displayLimit(value, currency = "USD") {
+  if (value === null) return "∞";
+  return displayMoney(value, currency);
+}
+
+function displayCount(value) {
+  return number(value) === null ? "-" : number(value).toLocaleString("en-US");
+}
+
 function normalizeUsageRange(value, fallback = DEFAULTS.usageRange) {
   return USAGE_RANGES.includes(value) ? value : fallback;
 }
@@ -67,23 +124,30 @@ function safeConfigValue(value, fallback = "") {
 }
 
 function normalizedConfig(value = {}) {
-  const interval = Number(value.refreshIntervalSeconds);
+  const source = isObject(value) ? value : {};
+  const raw = source.refreshIntervalSeconds;
+  // 空字符串、null 和 0 都不是合法的刷新间隔：Number("") 与 Number(null) 都等于 0，
+  // 直接参与夹取会得到 15 秒的轮询频率，等于把 CC Hub 打满。
+  const interval = typeof raw === "number"
+    ? raw
+    : typeof raw === "string" && raw.trim() ? Number(raw) : Number.NaN;
   return {
-    cchUrl: safeConfigValue(value.cchUrl || value.CCH_URL).replace(/\/+$/, ""),
-    apiKey: safeConfigValue(value.apiKey || value.CCH_API_KEY),
-    refreshIntervalSeconds: Number.isFinite(interval)
+    cchUrl: safeConfigValue(source.cchUrl || source.CCH_URL).replace(/\/+$/, ""),
+    apiKey: safeConfigValue(source.apiKey || source.CCH_API_KEY),
+    refreshIntervalSeconds: Number.isFinite(interval) && interval > 0
       ? Math.max(15, Math.min(3600, Math.round(interval)))
       : DEFAULTS.refreshIntervalSeconds,
   };
 }
 
-function finiteOrNull(value) {
-  return number(value);
+function hasConfig(value) {
+  return Boolean(value && typeof value.cchUrl === "string" && value.cchUrl.trim()
+    && typeof value.apiKey === "string" && value.apiKey.trim());
 }
 
 function firstNumber(...values) {
   for (const value of values) {
-    const normalized = finiteOrNull(value);
+    const normalized = number(value);
     if (normalized !== null) return normalized;
   }
   return null;
@@ -94,20 +158,52 @@ function sumNumbers(...values) {
   return numbers.length ? numbers.reduce((total, value) => total + value, 0) : null;
 }
 
-function safeCurrency(value) {
-  return typeof value === "string" && /^[A-Za-z]{1,6}$/.test(value) ? value : null;
+function finiteOrNull(value) {
+  return number(value);
+}
+
+/**
+ * 找到某个时间范围实际使用的数据来源。
+ *
+ * "1 天"会同时用到 /me/today 和 stats-summary 两个来源：today 负责调用次数与
+ * 成本，stats-summary 负责缓存字段。合并时 today 优先，这样放置其它按键
+ * 不会改变"1 天"按键已经显示出来的调用次数。
+ *
+ * slices 列出全部参与的数据分片，调用方据此判断这一段数据是否过期。
+ */
+function usageSourceFor(state = {}, range = "1d") {
+  const normalizedRange = normalizeUsageRange(range);
+  const source = isObject(state) ? state : {};
+  if (normalizedRange === "5h") {
+    return {
+      slice: "quota",
+      slices: ["quota"],
+      data: isObject(source.quota) ? source.quota : {},
+    };
+  }
+  const summaries = isObject(source.summaries) ? source.summaries : {};
+  if (normalizedRange === "1d") {
+    const summary = isObject(summaries["1d"]) ? summaries["1d"] : null;
+    const today = isObject(source.today) ? source.today : null;
+    if (summary && today) {
+      return { slice: "today", slices: ["today", "1d"], data: { ...summary, ...today } };
+    }
+    if (summary) return { slice: "1d", slices: ["1d"], data: summary };
+    if (today) return { slice: "today", slices: ["today"], data: today };
+    return { slice: "1d", slices: ["1d"], data: {} };
+  }
+  if (isObject(summaries[normalizedRange])) {
+    return {
+      slice: normalizedRange,
+      slices: [normalizedRange],
+      data: summaries[normalizedRange],
+    };
+  }
+  return { slice: normalizedRange, slices: [normalizedRange], data: {} };
 }
 
 function usageDataForRange(state = {}, range = "1d") {
-  const normalizedRange = normalizeUsageRange(range);
-  if (!state || typeof state !== "object") return {};
-  if (normalizedRange === "5h") return state.quota && typeof state.quota === "object" ? state.quota : {};
-  const summaries = state.summaries && typeof state.summaries === "object" ? state.summaries : {};
-  if (normalizedRange === "1d" && summaries["1d"] && typeof summaries["1d"] === "object") return summaries["1d"];
-  if (normalizedRange === "1d") return state.today && typeof state.today === "object" ? state.today : {};
-  return summaries[normalizedRange] && typeof summaries[normalizedRange] === "object"
-    ? summaries[normalizedRange]
-    : {};
+  return usageSourceFor(state, range).data;
 }
 
 /**
@@ -119,33 +215,39 @@ function aggregateUsageMetrics(value = {}, range = "1d") {
     && (value.today || value.summaries || value.quota)
     ? usageDataForRange(value, range)
     : value && typeof value === "object" ? value : {};
-  const inputTokens = firstNumber(source.inputTokens, source.totalInputTokens);
-  const outputTokens = firstNumber(source.outputTokens, source.totalOutputTokens);
-  const totalTokens = firstNumber(source.totalTokens, sumNumbers(inputTokens, outputTokens));
+  return aggregateUsageMetricsFrom(source);
+}
+
+/** 只针对一份已经定位好的汇总数据做归一化，避免再次按范围二次解析。 */
+function aggregateUsageMetricsFrom(source = {}) {
+  const input = isObject(source) ? source : {};
+  const inputTokens = firstNumber(input.inputTokens, input.totalInputTokens);
+  const outputTokens = firstNumber(input.outputTokens, input.totalOutputTokens);
+  const totalTokens = firstNumber(input.totalTokens, sumNumbers(inputTokens, outputTokens));
   const cacheCreationTokens = firstNumber(
-    source.cacheCreationTokens,
-    source.totalCacheCreationTokens,
-    source.cacheCreationInputTokens,
+    input.cacheCreationTokens,
+    input.totalCacheCreationTokens,
+    input.cacheCreationInputTokens,
   );
   const cacheReadTokens = firstNumber(
-    source.cacheReadTokens,
-    source.totalCacheReadTokens,
-    source.cacheReadInputTokens,
+    input.cacheReadTokens,
+    input.totalCacheReadTokens,
+    input.cacheReadInputTokens,
   );
   const cacheCreation5mTokens = firstNumber(
-    source.cacheCreation5mTokens,
-    source.totalCacheCreation5mTokens,
-    source.cacheCreation5mInputTokens,
+    input.cacheCreation5mTokens,
+    input.totalCacheCreation5mTokens,
+    input.cacheCreation5mInputTokens,
   );
   const cacheCreation1hTokens = firstNumber(
-    source.cacheCreation1hTokens,
-    source.totalCacheCreation1hTokens,
-    source.cacheCreation1hInputTokens,
+    input.cacheCreation1hTokens,
+    input.totalCacheCreation1hTokens,
+    input.cacheCreation1hInputTokens,
   );
   return {
-    calls: firstNumber(source.calls, source.totalRequests, source.requests),
-    cost: firstNumber(source.costUsd, source.totalCost, source.cost),
-    currencyCode: safeCurrency(source.currencyCode),
+    calls: firstNumber(input.calls, input.totalRequests, input.requests),
+    cost: firstNumber(input.costUsd, input.totalCost, input.cost),
+    currencyCode: safeCurrency(input.currencyCode),
     inputTokens,
     outputTokens,
     totalTokens,
@@ -309,21 +411,236 @@ function aggregateRecentSummary(value = {}) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// 视图模型：按键图片与按键标题共用同一份结果，避免两处逻辑漂移。
+// ---------------------------------------------------------------------------
+
+const RANGE_LABELS = { "1d": "1 天", "7d": "7 天", "1m": "30 天", "5h": "5 小时" };
+
+function quotaStatusText(quota) {
+  if (quota?.keyIsEnabled === false || quota?.userIsEnabled === false) return "禁用";
+  if (quota?.keyIsEnabled === true || quota?.userIsEnabled === true) return "启用";
+  return "";
+}
+
+function quotaExpiryText(quota) {
+  const value = quota?.expiresAt || quota?.userExpiresAt;
+  if (typeof value !== "string") return "";
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return "";
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Shanghai",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date(time));
+    const month = parts.find((part) => part.type === "month")?.value;
+    const day = parts.find((part) => part.type === "day")?.value;
+    return month && day ? `到期 ${month}-${day}` : "";
+  } catch {
+    return "";
+  }
+}
+
+/** 某个数据分片是否已经过期。整轮刷新失败时所有分片都算过期。 */
+function sliceStale(state = {}, slices = []) {
+  if (state?.stale) return true;
+  const fresh = state?.fresh;
+  if (!isObject(fresh)) return false;
+  const list = Array.isArray(slices) ? slices : [slices];
+  return list.some((slice) => fresh[slice] === false);
+}
+
+function quotaView(state = {}, quota = {}) {
+  const stale = sliceStale(state, ["quota"]);
+  const current = number(quota.keyCurrent5hUsd);
+  const limit = number(quota.keyLimit5hUsd);
+  const percent = current !== null && limit > 0 ? Math.min(999, current / limit * 100) : null;
+  const status = quotaStatusText(quota);
+  const expiry = quotaExpiryText(quota);
+  const concurrent = number(quota.keyCurrentConcurrentSessions);
+  const concurrentLimit = number(quota.keyLimitConcurrentSessions);
+  const details = [];
+  if (status === "禁用") details.push(status);
+  if (concurrent !== null) {
+    details.push(`并发 ${displayCount(concurrent)}${concurrentLimit === null ? "" : `/${displayCount(concurrentLimit)}`}`);
+  }
+  if (expiry) details.push(expiry);
+  if (!details.length && status) details.push(status);
+  const disabled = quota.keyIsEnabled === false || quota.userIsEnabled === false;
+  return {
+    label: "配额 · 5 小时",
+    value: `${displayMoney(current, quota.currencyCode)}/${displayLimit(limit, quota.currencyCode)}${percent === null ? "" : ` ${percent.toFixed(0)}%`}`,
+    tone: disabled || (percent !== null && percent >= 95)
+      ? "critical"
+      : percent !== null && percent >= 80
+        ? "warning"
+        : stale ? "stale" : "normal",
+    status: [...details, stale ? "数据过期" : ""].filter(Boolean).join(" "),
+    percent,
+  };
+}
+
+function recentView(state = {}) {
+  const stale = sliceStale(state, ["recent"]);
+  const summary = state.recentSummary || aggregateRecentSummary(state.recentLogs);
+  const latest = summary.latest || {};
+  const model = summary.lastModel || latest.model || latest.billingModel;
+  const details = [];
+  if (state.recentError) details.push("最近数据失败");
+  if (finiteOrNull(summary.failed) !== null) details.push(`失败 ${displayCount(summary.failed)}`);
+  if (finiteOrNull(summary.unknown) !== null && summary.unknown > 0) {
+    details.push(`未知 ${displayCount(summary.unknown)}`);
+  }
+  if (finiteOrNull(summary.avgDuration) !== null) {
+    details.push(`${Math.round(summary.avgDuration)}ms`);
+  }
+  if (finiteOrNull(summary.lastStatus) !== null) details.push(String(Math.round(summary.lastStatus)));
+  if (finiteOrNull(summary.cacheHitRate) !== null) {
+    details.push(`缓存 ${(summary.cacheHitRate * 100).toFixed(0)}%`);
+  }
+  return {
+    label: "最近调用",
+    value: `${displayCount(summary.count)}${state.recentTruncated ? "+" : ""}次${model ? ` ${safeModelName(model)}` : ""}`,
+    tone: summary.failed > 0 ? "warning" : stale ? "stale" : "normal",
+    status: [...details, stale ? "数据过期" : ""].filter(Boolean).join(" "),
+    percent: null,
+  };
+}
+
+function safeModelName(value) {
+  if (typeof value !== "string") return "未知模型";
+  const normalized = value.trim().replace(/[^A-Za-z0-9._/@:+-]/g, "");
+  return normalized ? normalized.slice(0, 18) : "未知模型";
+}
+
+function usageView(state = {}, range = "1d", metric = "callsCost") {
+  const rangeLabel = RANGE_LABELS[range] || range;
+  if (metric === "recent") return recentView(state);
+  if (range === "5h") {
+    const stale = sliceStale(state, ["quota"]);
+    const quota = isObject(state.quota) ? state.quota : {};
+    const value = metric === "callsCost"
+      ? displayMoney(quota.keyCurrent5hUsd, quota.currencyCode)
+      : metric === "cache" ? "缓存暂无"
+        : metric === "summary" ? "汇总暂无" : "Token暂无";
+    return {
+      label: "用量 · 5 小时",
+      value,
+      tone: stale ? "stale" : "normal",
+      status: stale ? "数据过期" : "",
+      percent: null,
+    };
+  }
+  const { slices, data } = usageSourceFor(state, range);
+  const stale = sliceStale(state, slices);
+  const metrics = aggregateUsageMetricsFrom(data);
+  const suffix = stale ? "数据过期" : "";
+  if (metric === "tokens") {
+    const tokenValue = metrics.inputTokens !== null || metrics.outputTokens !== null
+      ? `${displayCount(metrics.inputTokens)}+${displayCount(metrics.outputTokens)}`
+      : displayCount(metrics.totalTokens);
+    return {
+      label: `Token · ${rangeLabel}`,
+      value: `${tokenValue} Token`,
+      tone: stale ? "stale" : "normal",
+      status: suffix,
+      percent: null,
+    };
+  }
+  if (metric === "cache") {
+    const details = [
+      metrics.cacheCreation5mTokens === null ? "" : `5m ${displayCount(metrics.cacheCreation5mTokens)}`,
+      metrics.cacheCreation1hTokens === null ? "" : `1h ${displayCount(metrics.cacheCreation1hTokens)}`,
+      suffix,
+    ].filter(Boolean).join(" ");
+    return {
+      label: `缓存 · ${rangeLabel}`,
+      value: `${displayCount(metrics.cacheReadTokens)}读/${displayCount(metrics.cacheCreationTokens)}写`,
+      tone: stale ? "stale" : "normal",
+      status: details,
+      percent: null,
+    };
+  }
+  if (metric === "summary") {
+    return {
+      label: `汇总 · ${rangeLabel}`,
+      value: `${displayCount(metrics.calls)}次 ${displayMoney(metrics.cost, metrics.currencyCode)}`,
+      tone: stale ? "stale" : "normal",
+      status: suffix,
+      percent: null,
+    };
+  }
+  return {
+    label: `用量 · ${rangeLabel}`,
+    value: `${displayCount(metrics.calls)} 次 · ${displayMoney(metrics.cost, metrics.currencyCode)}`,
+    tone: stale ? "stale" : "normal",
+    status: suffix,
+    percent: null,
+  };
+}
+
+/**
+ * 生成按键的视图模型。图片和标题都从这里取数据，二者不会再出现分歧。
+ */
+function buildView(cid = "", state = {}, config = {}, keyData = {}) {
+  if (!config || !config.cchUrl || !config.apiKey) {
+    return {
+      label: "需要配置",
+      value: "请配置 CC Hub",
+      tone: "muted",
+      status: "未配置",
+      percent: null,
+    };
+  }
+  if (String(cid).endsWith(QUOTA_CID_SUFFIX)) {
+    return quotaView(state, isObject(state?.quota) ? state.quota : {});
+  }
+  const range = normalizeUsageRange(keyData?.range);
+  const metric = normalizeMetric(keyData?.metric);
+  return usageView(state, range, metric);
+}
+
+/** 按键标题：与图片共用视图模型，只做安全截断。 */
+function viewTitle(view = {}) {
+  const label = typeof view.label === "string" ? view.label : "";
+  const value = typeof view.value === "string" ? view.value : "";
+  const title = [label, value].filter(Boolean).join(" ");
+  return title.length > 120 ? `${title.slice(0, 119)}…` : title;
+}
+
+/** 视图指纹：只依赖真正显示出来的内容，刷新时间戳不参与。 */
+function fingerprintFor(cid = "", width = 0, view = {}) {
+  return JSON.stringify({ cid, width, view });
+}
+
 module.exports = {
   DEFAULTS,
   USAGE_RANGES,
   USAGE_METRICS,
+  DEFAULT_TIME_ZONE,
   localDate,
+  resolveTimeZone,
   number,
   textNumber,
   money,
   compactMoney,
   amount,
   compactAmount,
+  displayMoney,
+  displayLimit,
+  displayCount,
   normalizeUsageRange,
   normalizeMetric,
   usageDataForRange,
+  usageSourceFor,
   aggregateUsageMetrics,
+  aggregateUsageMetricsFrom,
   aggregateRecentSummary,
   normalizedConfig,
+  hasConfig,
+  buildView,
+  viewTitle,
+  fingerprintFor,
+  sliceStale,
 };
