@@ -42,7 +42,7 @@ API Key 只保存在 FlexDesigner 配置和本机权限受限的恢复副本中�
 
 ## 开发
 
-环境要求：Node.js 18+、FlexDesigner 1.3+、Flexbar。自绘渲染使用 `@napi-rs/canvas`，按键目标尺寸为 240×60；设备返回 180px 宽度时自动使用紧凑布局。构建时会把当前 Node 平台对应的 canvas 原生模块同步到插件包；当前发布包同时包含 macOS arm64 与 Windows x64 原生模块。
+环境要求：Node.js 18+、FlexDesigner 1.3+、Flexbar。自绘渲染使用 `@napi-rs/canvas`，按键目标尺寸为 240×60；设备返回 180px 宽度时自动使用紧凑布局。构建时会固定把 macOS arm64 与 Windows x64 的 canvas 原生模块同步到插件包；本地已安装则直接复用，缺失时（例如 Linux CI）由 `npm pack` 自动下载，因此原生二进制无需入库。
 
 ~~~bash
 npm install

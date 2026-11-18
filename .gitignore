@@ -3,14 +3,10 @@ logs
 .vscode
 .env
 package-lock.json
-/com.upkiry.flexbarcchusage.plugin/backend/*
-!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/
-!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/
-!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-darwin-arm64/
-!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-darwin-arm64/package.json
-!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-darwin-arm64/skia.darwin-arm64.node
-!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-win32-x64-msvc/
-!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-win32-x64-msvc/icudtl.dat
-!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-win32-x64-msvc/package.json
-!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-win32-x64-msvc/README.md
-!/com.upkiry.flexbarcchusage.plugin/backend/node_modules/@napi-rs/canvas-win32-x64-msvc/skia.win32-x64-msvc.node
+
+# 构建产物：由 npm run build 生成，不入库
+/com.upkiry.flexbarcchusage.plugin/backend/
+/com.upkiry.flexbarcchusage.flexplugin
+
+# 系统与编辑器垃圾
+.DS_Store

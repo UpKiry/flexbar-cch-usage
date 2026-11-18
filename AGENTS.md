@@ -7,6 +7,7 @@
 - `test/*.test.js` 存放 Node.js 单元测试。
 - `com.upkiry.flexbarcchusage.plugin/` 是插件发布目录：`manifest.json` 定义元数据和按键，`ui/` 包含 Vue 配置页面，`resources/` 存放静态资源。
 - `rollup.config.mjs` 将源码打包至已忽略的 `com.upkiry.flexbarcchusage.plugin/backend/` 目录。不要直接修改生成的后端文件。
+- 构建产物（`backend/` 与 `com.upkiry.flexbarcchusage.flexplugin`）一律不入库，由 `npm run build` 和 `npm run plugin:pack` 生成。请勿把 canvas 原生二进制（`.node`、`icudtl.dat`）提交回仓库。
 - `PLAN.md` 记录项目范围、验收标准和真机验证状态。
 
 ## 构建、测试与开发命令
