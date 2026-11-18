@@ -166,7 +166,8 @@ function createPluginRuntime({
   drawTimeoutMs = DRAW_TIMEOUT_MS,
 } = {}) {
   const devices = new Map();
-  const drawnSignatures = new Map();
+  const desiredSignatures = new Map();
+  const confirmedSignatures = new Map();
   const pending = new Map();
   const draining = new Set();
   let config = {};
@@ -174,6 +175,8 @@ function createPluginRuntime({
   let cache = emptyCache();
   let refreshPromise = null;
   let queuedRefresh = null;
+  let refreshDirty = false;
+  let pendingRedraw = false;
   let configVersion = 0;
   let refreshTimer = null;
   let configPromise = null;
@@ -252,9 +255,12 @@ function createPluginRuntime({
     if (!needsRead) return Promise.resolve(config);
     if (configPromise) return configPromise;
     configReadAt = now();
+    // 读取期间可能已经收到更新的配置，回来时必须核对版本，否则旧配置会覆盖新配置。
+    const version = configVersion;
     configPromise = readStoredConfig()
       .then((stored) => {
         configLoaded = true;
+        if (version !== configVersion) return config;
         const next = normalizedConfig(stored);
         const backup = readConfigBackup(configStorePath);
         if (!hasConfig(next) && backup) {
@@ -265,10 +271,10 @@ function createPluginRuntime({
               logger.warn(`恢复插件配置失败：${safeError(error)}`);
             });
           }
-          applyConfig(backup);
+          applyConfig(backup, { expectedVersion: version });
           return config;
         }
-        applyConfig(next);
+        applyConfig(next, { expectedVersion: version });
         return config;
       })
       .catch((error) => {
@@ -294,8 +300,10 @@ function createPluginRuntime({
 
   function forgetSignatures(serial) {
     const prefix = `${serial}:`;
-    for (const id of drawnSignatures.keys()) {
-      if (id.startsWith(prefix)) drawnSignatures.delete(id);
+    for (const id of [...desiredSignatures.keys(), ...confirmedSignatures.keys()]) {
+      if (!id.startsWith(prefix)) continue;
+      desiredSignatures.delete(id);
+      confirmedSignatures.delete(id);
     }
   }
 
@@ -315,7 +323,7 @@ function createPluginRuntime({
       // 代次变化会让在途绘制作废，避免旧按键的数据画到新按键上。
       device.generation += 1;
       for (const id of previous.keys()) {
-        if (!keys.has(id)) drawnSignatures.delete(`${device.serial}:${id}`);
+        if (!keys.has(id)) desiredSignatures.delete(`${device.serial}:${id}`);
       }
     }
     return changed;
@@ -408,8 +416,9 @@ function createPluginRuntime({
       await drawAll();
       return cache;
     }
+    const plan = requestPlan();
+    const planSignature = JSON.stringify(plan);
     try {
-      const plan = requestPlan();
       const result = await client.load(plan.ranges, plan.options);
       applyResult(result);
       failures = 0;
@@ -424,15 +433,29 @@ function createPluginRuntime({
       logError(`CC Hub ${reason}失败：${cache.error}`);
     }
     await drawAll();
+    // 抓取期间可能又来了新设备或新按键，这一轮的数据不覆盖它们，需要再跑一轮。
+    if (JSON.stringify(requestPlan()) !== planSignature) refreshDirty = true;
+    // 抓取期间接上的设备，这一轮的绘制可能没轮到它，补画一次（不再重新抓取）。
+    if (pendingRedraw) {
+      pendingRedraw = false;
+      drawAll();
+    }
     return cache;
   }
 
   /**
    * 触发一轮刷新。同一时刻只跑一轮，重复触发直接复用进行中的那一轮。
+   *
+   * 如果这一轮带着新的配置，而当前已经有刷新在跑，就把新配置排队，
+   * 等当前这轮结束后再跑一次——否则配置变更会被正在进行的刷新悄悄吞掉。
+   *
    * 返回的 Promise 永远不会 reject，避免宿主事件回调里出现未捕获异常。
    */
   function refresh(reason = "定时刷新", storedConfig) {
-    if (refreshPromise) return refreshPromise;
+    if (refreshPromise) {
+      if (storedConfig !== undefined) queuedRefresh = { reason, storedConfig };
+      return refreshPromise;
+    }
     refreshPromise = performRefresh(reason, storedConfig)
       .catch((error) => {
         logError(`刷新失败：${safeError(error)}`);
@@ -440,12 +463,24 @@ function createPluginRuntime({
       })
       .finally(() => {
         refreshPromise = null;
+        const queued = queuedRefresh;
+        queuedRefresh = null;
+        if (queued) {
+          void refresh(queued.reason, queued.storedConfig);
+        } else if (refreshDirty) {
+          // 上一轮抓取期间需求变了，补一轮。
+          refreshDirty = false;
+          void refresh("需求变更刷新");
+        }
       });
     return refreshPromise;
   }
 
-  function whenIdle() {
-    return refreshPromise || Promise.resolve();
+  /** 等待当前这轮刷新（含排队中的刷新）全部结束。 */
+  async function whenIdle() {
+    while (refreshPromise) {
+      await refreshPromise.catch(() => {});
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -464,9 +499,9 @@ function createPluginRuntime({
     }
     const signature = fingerprintFor(key.cid, width, view);
     const id = `${device.serial}:${keyIdentifier(key)}`;
-    if (drawnSignatures.get(id) === signature) return null;
-    const queue = pending.get(device.serial);
-    if (queue && queue.get(id)?.signature === signature) return null;
+    // desired 记录"这一格应该显示什么"，排队中和画成功的都算。
+    // 只看画成功的签名会漏掉"正在画"的那一次，从而重复排队。
+    if (desiredSignatures.get(id) === signature) return null;
 
     let rendered;
     try {
@@ -483,6 +518,7 @@ function createPluginRuntime({
       showImage: true,
     };
     key.title = viewTitle(view);
+    desiredSignatures.set(id, signature);
     return {
       id,
       serial: device.serial,
@@ -498,9 +534,13 @@ function createPluginRuntime({
     if (!device || device.generation !== update.generation) return;
     try {
       await withTimeout(plugin.draw(update.serial, update.key, "base64", update.image), drawTimeoutMs);
-      drawnSignatures.set(update.id, update.signature);
+      confirmedSignatures.set(update.id, update.signature);
     } catch (error) {
-      // 失败时保留旧签名，下一轮会重试。
+      // 失败时把期望值清掉，下一轮会重试。
+      if (desiredSignatures.get(update.id) === update.signature) {
+        desiredSignatures.delete(update.id);
+        confirmedSignatures.delete(update.id);
+      }
       logError(`更新 Flexbar 按键失败：${safeError(error)}`);
     }
   }
@@ -586,6 +626,9 @@ function createPluginRuntime({
         if (KEY_CIDS.has(key.cid)) keys.set(keyIdentifier(key), key);
       }
       applyKeys(device, keys);
+      // 如果这轮抓取已经在跑，它的绘制可能没轮到新接上的设备，记下来补画一次。
+      // 这里不直接渲染，避免在宿主事件回调里做耗时的画布编码。
+      if (refreshPromise) pendingRedraw = true;
       void refresh("启动刷新");
       return { status: "success" };
     },
@@ -653,7 +696,14 @@ function createPluginRuntime({
           ? { ...payload, ...payload.data }
           : payload || {};
       if (message.action === "getConfig") {
-        await ensureConfig();
+        // 不无限等待宿主读配置：读不到就返回当前已有的值。
+        await Promise.race([
+          ensureConfig(),
+          new Promise((resolve) => {
+            const timer = setTimeout(resolve, 4000);
+            if (typeof timer.unref === "function") timer.unref();
+          }),
+        ]);
         return { status: "success", config: { ...config } };
       }
       if (message.action === "applyConfig") {
@@ -683,7 +733,8 @@ function createPluginRuntime({
   };
 
   function forgetSignaturesForAll() {
-    drawnSignatures.clear();
+    desiredSignatures.clear();
+    confirmedSignatures.clear();
   }
 
   function register() {
@@ -722,7 +773,7 @@ function createPluginRuntime({
       config: { ...config, apiKey: config.apiKey ? "[已配置]" : "" },
       cache: { ...cache },
       deviceCount: devices.size,
-      fingerprintCount: drawnSignatures.size,
+      fingerprintCount: confirmedSignatures.size,
       refreshing: Boolean(refreshPromise),
       failures,
     };

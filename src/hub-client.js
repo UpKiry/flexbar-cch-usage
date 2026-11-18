@@ -542,15 +542,19 @@ class HubClient {
       ? setTimeout(() => controller.abort(), this.deadlineMs)
       : null;
     if (deadlineTimer && typeof deadlineTimer.unref === "function") deadlineTimer.unref();
-    const settled = await Promise.all(plan.map(async (item) => {
-      try {
-        const value = await item.run(controller?.signal);
-        return { slice: item.slice, value };
-      } catch (error) {
-        return { slice: item.slice, error: this.errorMessage(error?.message || "查询失败") };
-      }
-    }));
-    if (deadlineTimer) clearTimeout(deadlineTimer);
+    let settled;
+    try {
+      settled = await Promise.all(plan.map(async (item) => {
+        try {
+          const value = await item.run(controller?.signal);
+          return { slice: item.slice, value };
+        } catch (error) {
+          return { slice: item.slice, error: this.errorMessage(error?.message || "查询失败") };
+        }
+      }));
+    } finally {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+    }
 
     const quota = settled.find((item) => item.slice === "quota");
     const today = settled.find((item) => item.slice === "today");
@@ -580,10 +584,15 @@ class HubClient {
     };
   }
 
-  /** 轻量连通性检查：只登录并取一次配额，用于配置页的"测试连接"。 */
+  /** 轻量连通性检查：登录成功即代表地址与密钥可用，配额接口缺失也不算失败。 */
   async ping() {
     if (!this.cookie) await this.login();
-    await this.getQuota();
+    try {
+      await this.getQuota();
+    } catch (error) {
+      if (/HTTP 404/.test(error?.message || "")) return true;
+      throw error;
+    }
     return true;
   }
 }

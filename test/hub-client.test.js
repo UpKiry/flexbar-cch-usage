@@ -20,6 +20,7 @@ const baseConfig = {
   apiKey: "secret-api-key",
   now: () => Date.parse("2026-09-12T01:00:00.000Z"),
   timeoutSignal: () => undefined,
+  timeZone: "Asia/Shanghai",
 };
 
 test("loads requested endpoints with Shanghai date ranges", async () => {
@@ -112,6 +113,7 @@ test("GET 网络错误按指数退避最多重试两次并限制 Retry-After", a
   const sleeps = [];
   const client = new HubClient({
     ...baseConfig,
+    maxRetries: 2,
     sleep: async (milliseconds) => sleeps.push(milliseconds),
     fetchImpl: async () => {
       attempts += 1;
@@ -125,6 +127,111 @@ test("GET 网络错误按指数退避最多重试两次并限制 Retry-After", a
   assert.deepEqual(await client.request("/api/v1/me/today"), { calls: 1 });
   assert.equal(attempts, 3);
   assert.deepEqual(sleeps, [250, 5000]);
+});
+
+test("默认只重试一次，避免一次刷新拖住三分钟", async () => {
+  let attempts = 0;
+  const client = new HubClient({
+    ...baseConfig,
+    sleep: async () => {},
+    fetchImpl: async () => {
+      attempts += 1;
+      return response(503, { error: "busy" });
+    },
+  });
+  await assert.rejects(client.request("/api/v1/me/today"));
+  assert.equal(attempts, 2);
+});
+
+test("单个接口失败不会连累其它接口", async () => {
+  const client = new HubClient({
+    ...baseConfig,
+    fetchImpl: async (url) => {
+      if (url.includes("stats-summary")) return response(500, { error: "统计接口挂了" });
+      if (url.endsWith("/api/v1/me/quota")) return response(200, { keyCurrent5hUsd: 1 });
+      return response(200, { calls: 3 });
+    },
+  });
+  client.cookie = "auth-token=session";
+  const result = await client.load(["1d", "7d"]);
+  assert.equal(result.quota.keyCurrent5hUsd, 1);
+  assert.equal(result.today.calls, 3);
+  assert.equal(result.summaries["7d"], undefined);
+  assert.ok(result.errors["7d"]);
+});
+
+test("字段类型不符只丢弃该字段，不会让整轮失败", async () => {
+  const client = new HubClient({
+    ...baseConfig,
+    fetchImpl: async (url) => {
+      if (url.endsWith("/api/v1/me/today")) {
+        return response(200, { calls: 4, costUsd: "1.20", inputTokens: 10, outputTokens: 2 });
+      }
+      return response(200, { keyCurrent5hUsd: 1 });
+    },
+  });
+  client.cookie = "auth-token=session";
+  const result = await client.load(["1d"]);
+  assert.equal(result.today.calls, 4);
+  assert.equal(result.today.costUsd, undefined);
+  assert.equal(result.today.inputTokens, 10);
+  assert.ok(Array.isArray(result.problems));
+});
+
+test("401 返回 HTML 时也会重新登录", async () => {
+  let loginCount = 0;
+  let quotaCount = 0;
+  const client = new HubClient({
+    ...baseConfig,
+    fetchImpl: async (url) => {
+      if (url.endsWith("/api/auth/login")) {
+        loginCount += 1;
+        return response(200, {}, { "set-cookie": `auth-token=session-${loginCount}; Path=/` });
+      }
+      quotaCount += 1;
+      if (quotaCount === 1) {
+        return response(401, "<html><body>请登录</body></html>", { "content-type": "text/html" });
+      }
+      return response(200, { keyCurrent5hUsd: 1 });
+    },
+  });
+  client.cookie = "auth-token=old";
+  const result = await client.request("/api/v1/me/quota");
+  assert.deepEqual(result, { keyCurrent5hUsd: 1 });
+  assert.equal(loginCount, 1);
+  assert.equal(quotaCount, 2);
+});
+
+test("保留 CC Hub 部署在子路径下的前缀", async () => {
+  const urls = [];
+  const client = new HubClient({
+    ...baseConfig,
+    cchUrl: "https://hub.example/cc-hub/",
+    fetchImpl: async (url) => {
+      urls.push(url);
+      return response(200, { keyCurrent5hUsd: 1 });
+    },
+  });
+  client.cookie = "auth-token=session";
+  await client.getQuota();
+  assert.match(urls[0], /^https:\/\/hub\.example\/cc-hub\/api\/v1\/me\/quota$/);
+});
+
+test("日期窗口按本地时区计算", async () => {
+  const urls = [];
+  const client = new HubClient({
+    ...baseConfig,
+    timeZone: "America/Los_Angeles",
+    fetchImpl: async (url) => {
+      urls.push(new URL(url));
+      return response(200, { totalRequests: 1 });
+    },
+  });
+  client.cookie = "auth-token=session";
+  await client.load(["1d"], { includeDailySummary: true });
+  const daily = urls.find((url) => url.pathname.endsWith("/stats-summary"));
+  assert.equal(daily.searchParams.get("startDate"), "2026-09-11");
+  assert.equal(daily.searchParams.get("endDate"), "2026-09-11");
 });
 
 test("登录 POST 失败不重试并校验对象响应", async () => {

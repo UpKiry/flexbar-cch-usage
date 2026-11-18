@@ -9,7 +9,7 @@
 <script>
 export default {
   name: "QuotaSettings",
-  props: { modelValue: { type: Object, required: true } },
+  props: { modelValue: { type: Object, default: () => ({}) } },
   emits: ["update:modelValue"],
 };
 </script>

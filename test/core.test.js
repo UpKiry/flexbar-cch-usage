@@ -12,6 +12,8 @@ const {
   normalizeMetric,
   normalizedConfig,
   normalizeUsageRange,
+  buildView,
+  usageSourceFor,
 } = require("../src/core");
 
 test("normalizes defaults, aliases, URL slashes and numeric bounds", () => {
@@ -161,4 +163,53 @@ test("把非 2xx 状态计为失败并单独记录缺失状态", () => {
   });
   assert.equal(summary.failed, 1);
   assert.equal(summary.unknown, 1);
+});
+
+test("空刷新间隔回落到默认值而不是 15 秒", () => {
+  for (const value of ["", null, undefined, 0, "abc"]) {
+    assert.equal(normalizedConfig({ refreshIntervalSeconds: value }).refreshIntervalSeconds, 60);
+  }
+  assert.equal(normalizedConfig({ refreshIntervalSeconds: 15.4 }).refreshIntervalSeconds, 15);
+  assert.equal(normalizedConfig({ refreshIntervalSeconds: 99999 }).refreshIntervalSeconds, 3600);
+});
+
+test("一天范围以 today 为准，统计接口只补缓存字段", () => {
+  const state = {
+    today: { calls: 5, costUsd: 1, inputTokens: 10, outputTokens: 2 },
+    summaries: { "1d": { totalRequests: 9, totalCost: 3, totalCacheReadTokens: 7 } },
+  };
+  const source = usageSourceFor(state, "1d");
+  assert.deepEqual(source.slices, ["today", "1d"]);
+  const view = buildView("com.upkiry.flexbarcchusage.usage", state, { cchUrl: "https://hub.example", apiKey: "k" }, { range: "1d" });
+  // 放置其它按键不会让"1 天"的调用次数变掉。
+  assert.match(view.value, /5 次/);
+  assert.doesNotMatch(view.value, /9 次/);
+  const cache = buildView("com.upkiry.flexbarcchusage.usage", state, { cchUrl: "https://hub.example", apiKey: "k" }, { range: "1d", metric: "cache" });
+  assert.match(cache.value, /7读\/-写/);
+});
+
+test("未配置时按键显示固定提示，不泄露接口错误", () => {
+  const view = buildView("com.upkiry.flexbarcchusage.usage", { stale: true, error: "secret upstream" }, {}, { range: "1d" });
+  assert.equal(view.label, "需要配置");
+  assert.equal(view.value, "请配置 CC Hub");
+  assert.equal(view.status, "未配置");
+  assert.equal(JSON.stringify(view).includes("secret"), false);
+});
+
+test("单个分片过期只影响使用它的按键", () => {
+  const config = { cchUrl: "https://hub.example", apiKey: "k" };
+  const state = {
+    quota: { keyCurrent5hUsd: 1, keyLimit5hUsd: 2 },
+    today: { calls: 3 },
+    summaries: {},
+    fresh: { quota: true, today: true, "7d": false },
+    stale: false,
+  };
+  const quota = buildView("com.upkiry.flexbarcchusage.quota", state, config, {});
+  const day = buildView("com.upkiry.flexbarcchusage.usage", state, config, { range: "1d" });
+  const week = buildView("com.upkiry.flexbarcchusage.usage", state, config, { range: "7d" });
+  assert.equal(quota.tone, "normal");
+  assert.equal(day.tone, "normal");
+  assert.equal(week.tone, "stale");
+  assert.match(week.status, /数据过期/);
 });
