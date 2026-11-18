@@ -136,6 +136,103 @@ test("requests the union of configured usage ranges", async () => {
   runtime.stop();
 });
 
+test("只有最近调用指标才启用受限日志采集", async () => {
+  const plugin = makePlugin({ cchUrl: "https://hub.example", apiKey: "secret", refreshIntervalSeconds: 15 });
+  const calls = [];
+  class FakeClient {
+    async load(ranges, options) {
+      calls.push({ ranges, options });
+      return {
+        quota: {},
+        summaries: {},
+        recentLogs: {
+          items: [{ model: "claude-sonnet-4", statusCode: 200, duration: 120, createdAt: "2026-09-12T00:00:00.000Z" }],
+          pageInfo: { hasMore: false },
+        },
+      };
+    }
+  }
+  const runtime = createPluginRuntime({
+    plugin,
+    logger: { error: () => {}, warn: () => {} },
+    HubClientClass: FakeClient,
+    renderKeyFn,
+    setIntervalFn: () => ({}),
+    clearIntervalFn: () => {},
+  });
+  await runtime.handlers.alive({
+    serialNumber: "A",
+    keys: [{ cid: cid("usage"), uid: "recent", width: 240, style: {}, data: { range: "1d", metric: "recent" } }],
+  });
+  assert.deepEqual(calls, [{
+    ranges: [],
+    options: { includeRecentLogs: true, recentLimit: 8, recentDays: 1 },
+  }]);
+  assert.equal(runtime.getState().cache.recentSummary.count, 1);
+  assert.equal(runtime.getState().cache.recentSummary.lastModel, "claude-sonnet-4");
+  runtime.stop();
+});
+
+test("一天缓存指标会请求每日汇总", async () => {
+  const plugin = makePlugin({ cchUrl: "https://hub.example", apiKey: "secret", refreshIntervalSeconds: 15 });
+  const calls = [];
+  class FakeClient {
+    async load(ranges, options) {
+      calls.push({ ranges, options });
+      return { quota: {}, today: {}, summaries: { "1d": { totalCacheReadTokens: 4, totalCacheCreationTokens: 5 } } };
+    }
+  }
+  const runtime = createPluginRuntime({
+    plugin,
+    logger: { error: () => {}, warn: () => {} },
+    HubClientClass: FakeClient,
+    renderKeyFn,
+    setIntervalFn: () => ({}),
+    clearIntervalFn: () => {},
+  });
+  await runtime.handlers.alive({
+    serialNumber: "A",
+    keys: [{ cid: cid("usage"), uid: "cache", width: 240, style: {}, data: { range: "1d", metric: "cache" } }],
+  });
+  assert.deepEqual(calls, [{
+    ranges: ["1d"],
+    options: { includeRecentLogs: false, recentLimit: 8, recentDays: 1, includeDailySummary: true },
+  }]);
+  runtime.stop();
+});
+
+test("最近日志临时失败时保留上一轮摘要并标记局部错误", async () => {
+  const plugin = makePlugin({ cchUrl: "https://hub.example", apiKey: "secret", refreshIntervalSeconds: 15 });
+  let failed = false;
+  class FakeClient {
+    async load() {
+      if (failed) return { quota: {}, summaries: {}, recentError: "查询失败" };
+      return {
+        quota: {},
+        summaries: {},
+        recentLogs: { items: [{ model: "model-a", statusCode: 200, createdAt: "2026-09-12T00:00:00.000Z" }] },
+      };
+    }
+  }
+  const runtime = createPluginRuntime({
+    plugin,
+    logger: { error: () => {}, warn: () => {} },
+    HubClientClass: FakeClient,
+    renderKeyFn,
+    setIntervalFn: () => ({}),
+    clearIntervalFn: () => {},
+  });
+  await runtime.handlers.alive({
+    serialNumber: "A",
+    keys: [{ cid: cid("usage"), uid: "recent", width: 240, style: {}, data: { metric: "recent" } }],
+  });
+  failed = true;
+  await runtime.refresh("再次刷新");
+  assert.equal(runtime.getState().cache.recentSummary.lastModel, "model-a");
+  assert.equal(runtime.getState().cache.recentError, "查询失败");
+  runtime.stop();
+});
+
 test("serializes config updates behind an in-flight refresh", async () => {
   const configA = { cchUrl: "https://a.example", apiKey: "key-a", refreshIntervalSeconds: 15 };
   const configB = { cchUrl: "https://b.example", apiKey: "key-b", refreshIntervalSeconds: 20 };

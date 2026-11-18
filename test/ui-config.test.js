@@ -13,6 +13,10 @@ test("usage and quota settings do not emit while mounting", () => {
   assert.doesNotMatch(usage, /mounted\(\)[\s\S]*emitUpdate\(\)/);
   assert.doesNotMatch(quota, /mounted\(|emitUpdate\(|v-radio/);
   for (const label of ["5 小时", "1 天", "7 天", "30 天"]) assert.match(usage, new RegExp(label));
+  for (const label of ["调用次数与成本", "输入与输出 Token", "缓存读写", "最近调用", "日期汇总"]) {
+    assert.match(usage, new RegExp(label));
+  }
+  assert.match(usage, /data:\s*\{\s*\.\.\.data,\s*range:\s*this\.range,\s*metric:\s*this\.metric/);
 });
 
 test("connection test uses backend message without persisting config", () => {

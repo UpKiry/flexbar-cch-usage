@@ -1,6 +1,16 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { USAGE_RANGES, number, textNumber, compactMoney, normalizedConfig, normalizeUsageRange } = require("./core");
+const {
+  USAGE_RANGES,
+  number,
+  textNumber,
+  compactMoney,
+  compactAmount,
+  normalizedConfig,
+  normalizeMetric,
+  normalizeUsageRange,
+  aggregateRecentSummary,
+} = require("./core");
 const { HubClient, redactSecrets } = require("./hub-client");
 const { WIDTH: RENDER_WIDTH, renderKey } = require("./render");
 
@@ -9,13 +19,37 @@ const KEY_CIDS = new Set([
   "com.upkiry.flexbarcchusage.usage",
 ]);
 
+// 指标由按键 data.metric 决定。保留默认值可以兼容旧版已放置的按键。
+const USAGE_METRICS = new Set(["callsCost", "tokens", "cache", "recent", "summary"]);
+const QUOTA_METRIC = "quotaStatus";
+
 function emptyCache() {
-  return { quota: null, today: null, summaries: {}, fetchedAt: null, stale: true, error: null };
+  return {
+    quota: null,
+    today: null,
+    summaries: {},
+    recentLogs: null,
+    recentSummary: null,
+    recentError: null,
+    fetchedAt: null,
+    stale: true,
+    error: null,
+  };
 }
 
 function keyRange(key) {
   if (key?.cid?.endsWith("quota")) return "5h";
   return normalizeUsageRange(key?.data?.range, "1d");
+}
+
+function keyMetric(key) {
+  if (key?.cid?.endsWith("quota")) return QUOTA_METRIC;
+  const metric = normalizeMetric(key?.data?.metric);
+  return USAGE_METRICS.has(metric) ? metric : "callsCost";
+}
+
+function summarizeRecentLogs(value) {
+  return aggregateRecentSummary(value);
 }
 
 function findMessageConfig(value, depth = 0) {
@@ -96,23 +130,70 @@ function createPluginRuntime({
       const percent = number(current) !== null && number(limit) > 0
         ? ` ${Math.min(999, current / limit * 100).toFixed(0)}%`
         : "";
-      return `配额 5 小时 ${compactMoney(current)}/${compactMoney(limit)}${percent}${suffix}`;
+      return `配额 5 小时 ${compactAmount(current)}/${compactMoney(limit)}${percent}${suffix}`;
     }
     const range = keyRange(key);
-    if (range === "5h") return `用量 5 小时 ${compactMoney(state.quota?.keyCurrent5hUsd, state.quota?.currencyCode)}${suffix}`;
-    const data = range === "1d" ? state.today : state.summaries?.[range];
+    const metric = keyMetric(key);
+    if (metric === "recent") {
+      const summary = state.recentSummary || summarizeRecentLogs(state.recentLogs);
+      const latestModel = summary.lastModel || summary.latest?.model || summary.latest?.billingModel;
+      const recentCount = summary.count ?? summary.totalRequests ?? 0;
+      return `最近 ${textNumber(recentCount)}次${latestModel ? ` ${latestModel}` : ""}${suffix}`;
+    }
+    if (range === "5h") {
+      if (metric === "callsCost") {
+        return `用量 5 小时 ${compactAmount(state.quota?.keyCurrent5hUsd, state.quota?.currencyCode)}${suffix}`;
+      }
+      const unavailable = metric === "cache" ? "缓存暂无" : metric === "tokens" ? "Token暂无" : "汇总暂无";
+      return `用量 5 小时 ${unavailable}${suffix}`;
+    }
+    const data = range === "1d" ? (state.summaries?.["1d"] || state.today) : state.summaries?.[range];
     const rangeLabel = { "1d": "1 天", "7d": "7 天", "1m": "30 天" }[range] || range;
-    return `用量 ${rangeLabel} ${textNumber(data?.calls ?? data?.totalRequests)}次 ${compactMoney(data?.costUsd ?? data?.totalCost, data?.currencyCode)}${suffix}`;
+    if (metric === "tokens") {
+      const input = data?.inputTokens ?? data?.totalInputTokens;
+      const output = data?.outputTokens ?? data?.totalOutputTokens;
+      if (input === undefined && output === undefined && data?.totalTokens !== undefined) {
+        return `用量 ${rangeLabel} ${textNumber(data.totalTokens)} Token${suffix}`;
+      }
+      return `用量 ${rangeLabel} ${textNumber(input)}+${textNumber(output)} Token${suffix}`;
+    }
+    if (metric === "cache") {
+      const read = data?.cacheReadTokens ?? data?.totalCacheReadTokens;
+      const created = data?.cacheCreationTokens ?? data?.totalCacheCreationTokens;
+      return `缓存 ${rangeLabel} ${textNumber(read)}读/${textNumber(created)}写${suffix}`;
+    }
+    return `用量 ${rangeLabel} ${textNumber(data?.calls ?? data?.totalRequests)}次 ${compactAmount(data?.costUsd ?? data?.totalCost, data?.currencyCode)}${suffix}`;
   }
 
   function requiredRanges() {
     const ranges = new Set();
     for (const keys of keysByDevice.values()) {
       for (const key of keys.values()) {
+        // 最近调用由 usage-logs 接口单独提供，不需要额外的日期汇总请求。
+        if (keyMetric(key) === "recent") continue;
         ranges.add(keyRange(key));
       }
     }
     return USAGE_RANGES.filter((range) => ranges.has(range));
+  }
+
+  function requestOptions() {
+    let includeRecentLogs = false;
+    let includeDailySummary = false;
+    for (const keys of keysByDevice.values()) {
+      for (const key of keys.values()) {
+        if (keyMetric(key) === "recent") includeRecentLogs = true;
+        if (keyRange(key) !== "5h" && ["cache", "summary"].includes(keyMetric(key))) {
+          includeDailySummary = true;
+        }
+      }
+    }
+    return {
+      includeRecentLogs,
+      recentLimit: 8,
+      recentDays: 1,
+      ...(includeDailySummary ? { includeDailySummary: true } : {}),
+    };
   }
 
   function prepareKey(serialNumber, key) {
@@ -223,11 +304,19 @@ function createPluginRuntime({
       return cache;
     }
     try {
-      const data = await client.load(requiredRanges());
+      const ranges = requiredRanges();
+      const options = requestOptions();
+      // 第二个参数是可选的，旧版测试客户端/插件仍可只接收 ranges。
+      const data = await client.load(ranges, options);
+      const recentUnavailable = options.includeRecentLogs && data.recentError;
       cache = {
         ...emptyCache(),
         ...data,
         summaries: data.summaries || {},
+        recentLogs: data.recentLogs || (recentUnavailable ? cache.recentLogs : null),
+        recentSummary: data.recentSummary
+          || (recentUnavailable ? cache.recentSummary : summarizeRecentLogs(data.recentLogs)),
+        recentError: data.recentError || null,
         fetchedAt: now(),
         stale: false,
         error: null,
@@ -400,4 +489,12 @@ function createPluginRuntime({
   return { start, stop, register, refresh, handlers, getState };
 }
 
-module.exports = { KEY_CIDS, createPluginRuntime, emptyCache, findMessageConfig };
+module.exports = {
+  KEY_CIDS,
+  USAGE_METRICS,
+  createPluginRuntime,
+  emptyCache,
+  findMessageConfig,
+  keyMetric,
+  summarizeRecentLogs,
+};
