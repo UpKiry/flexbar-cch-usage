@@ -1,54 +1,23 @@
-const fs = require("node:fs");
-const path = require("node:path");
-const { createCanvas, GlobalFonts } = require("@napi-rs/canvas");
+const { createCanvas } = require("@napi-rs/canvas");
 const { buildView, fingerprintFor } = require("./core");
 
 const WIDTH = 240;
 const COMPACT_WIDTH = 180;
 const HEIGHT = 60;
-const FONT_FAMILY = "FlexCJK";
-const FONT_NAME = "SourceHanSansCJK-subset.woff2";
+// 使用系统字体渲染，不再捆绑字体子集。canvas 按列表取第一个能解析到的字体家族，
+// 解析不到的自动跳过：macOS 用 Hiragino Sans GB/Heiti SC，Windows 用 Microsoft YaHei，
+// Linux 用 Noto Sans CJK SC，最后由 ", sans-serif" 回退到系统默认字体兜底。
+// 注意不要只用 sans-serif：macOS 的默认回退链会落到繁体/日文字体上，
+// 「缓」「读」「写」等简体字会变成占位框。
+const FONT_STACK = `"Hiragino Sans GB", "Heiti SC", "Microsoft YaHei", "Noto Sans CJK SC"`;
 const REQUIRED_GLYPHS = "配额用量小时天最近数据过期请配置未未知无限制次调用成本输入输出Token缓存读取创建模型状态耗时失败成功启用禁用并发到期暂无读写汇总查询刷新连接失败需要配置h d m0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzCC Hub∞$%/.-,:·…+";
-const FONT_PATHS = [
-  path.resolve(__dirname, "../resources/fonts", FONT_NAME),
-  path.resolve(__dirname, "../com.upkiry.flexbarcchusage.plugin/resources/fonts", FONT_NAME),
-];
 const PAINT_CACHE_LIMIT = 64;
 
-// 字体状态只计算一次。旧实现在字体缺失时直接抛异常，导致每一轮刷新都失败。
-let fontState = null;
 // 按指纹缓存 PNG，避免同一个视图重复编码。
 const paintCache = new Map();
 
-function ensureFont() {
-  if (fontState) return fontState;
-  const fontPath = FONT_PATHS.find((candidate) => fs.existsSync(candidate));
-  const missing = [];
-  let registered = false;
-  if (fontPath) {
-    try {
-      GlobalFonts.registerFromPath(fontPath, FONT_FAMILY);
-      registered = true;
-    } catch {
-      registered = false;
-    }
-  }
-  if (registered) {
-    for (const glyph of REQUIRED_GLYPHS) {
-      if (!GlobalFonts.has(FONT_FAMILY, glyph)) missing.push(glyph);
-    }
-  }
-  fontState = {
-    family: registered ? FONT_FAMILY : "sans-serif",
-    registered,
-    missing,
-    path: fontPath || null,
-  };
-  return fontState;
-}
-
 function fontFamily() {
-  return ensureFont().family;
+  return FONT_STACK;
 }
 
 function finite(value) {
@@ -198,5 +167,5 @@ module.exports = {
   REQUIRED_GLYPHS,
   renderKey,
   metric,
-  ensureFont,
+  fontFamily,
 };

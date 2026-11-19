@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { GlobalFonts } = require("@napi-rs/canvas");
-const { WIDTH, COMPACT_WIDTH, HEIGHT, REQUIRED_GLYPHS, renderKey } = require("../src/render");
+const { createCanvas } = require("@napi-rs/canvas");
+const { WIDTH, COMPACT_WIDTH, HEIGHT, REQUIRED_GLYPHS, renderKey, fontFamily } = require("../src/render");
 
 const config = { cchUrl: "https://hub.example", apiKey: "configured" };
 const state = {
@@ -33,9 +33,35 @@ test("renders every fixed key as a bounded PNG at full and compact widths", () =
   }
 });
 
-test("bundled font covers every glyph used by the renderer", () => {
-  renderKey("com.upkiry.flexbarcchusage.usage", state, config, WIDTH, { range: "1d" });
-  for (const glyph of REQUIRED_GLYPHS) assert.equal(GlobalFonts.has("FlexCJK", glyph), true, `missing glyph: ${glyph}`);
+test("系统字体实际画出渲染器用到的每个字形", () => {
+  // 元数据检查（如 GlobalFonts.has）发现不了空字形，纯像素非空检查又发现不了
+  // 豆腐块占位框，这里逐像素对比：每个字形必须真的画出内容，且不能等于
+  // 未分配码位 U+0378 渲染出的 .notdef 占位框。
+  const paint = (glyph) => {
+    const canvas = createCanvas(64, 64);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, 64, 64);
+    ctx.font = `700 40px ${fontFamily()}, sans-serif`;
+    ctx.fillStyle = "#fff";
+    ctx.fillText(glyph, 8, 48);
+    return Buffer.from(ctx.getImageData(0, 0, 64, 64).data);
+  };
+  const lit = (data) => {
+    let count = 0;
+    for (let i = 0; i < data.length; i += 4) if (data[i] > 40) count += 1;
+    return count;
+  };
+  const notdef = paint("\u0378");
+  assert.ok(lit(notdef) >= 5, "占位框基线没有画出来，检查方式失效");
+  const seen = new Set();
+  for (const glyph of REQUIRED_GLYPHS) {
+    if (glyph === " " || seen.has(glyph)) continue;
+    seen.add(glyph);
+    const data = paint(glyph);
+    assert.ok(lit(data) >= 5, `字形没有画出来: ${glyph}`);
+    assert.equal(data.equals(notdef), false, `字形画成了占位框: ${glyph}`);
+  }
 });
 
 test("renders safe fixed states without arbitrary API error text", () => {
@@ -97,7 +123,7 @@ test("根据接口字段渲染 Token、缓存、最近调用和配额状态指�
   };
   const token = renderKey("com.upkiry.flexbarcchusage.usage", metricState, config, WIDTH, { range: "1d", metric: "tokens" });
   assert.match(token.view.label, /Token/);
-  assert.match(token.view.value, /1,000\+200 Token/);
+  assert.match(token.view.value, /1K\+200 Token/);
 
   const cache = renderKey("com.upkiry.flexbarcchusage.usage", metricState, config, WIDTH, { range: "7d", metric: "cache" });
   assert.match(cache.view.value, /80读\/20写/);

@@ -98,6 +98,39 @@ function displayCount(value) {
   return number(value) === null ? "-" : number(value).toLocaleString("en-US");
 }
 
+const COUNT_UNITS = [
+  { unit: "K", scale: 1e3 },
+  { unit: "M", scale: 1e6 },
+  { unit: "B", scale: 1e9 },
+  { unit: "T", scale: 1e12 },
+];
+
+/**
+ * Token 数量显示：大数改用 K/M/B 缩写，按键上一眼可读。
+ *
+ * 小于 1000 保持精确数字；单位内小于 10 保留一位小数（如 1.2K），
+ * 其余取整（如 12K）。四舍五入进位到 1000 时升到上一级单位（999500 → 1M），
+ * 避免出现 "1000K" 这样的写法。
+ */
+function displayTokens(value) {
+  const count = number(value);
+  if (count === null) return "-";
+  const abs = Math.abs(count);
+  if (abs < 1000) return String(count);
+  let index = 0;
+  while (index + 1 < COUNT_UNITS.length && abs >= COUNT_UNITS[index + 1].scale) index += 1;
+  const format = (step) => {
+    const scaled = count / step.scale;
+    return (scaled < 10 ? scaled.toFixed(1) : String(Math.round(scaled))).replace(/\.0$/, "");
+  };
+  let text = format(COUNT_UNITS[index]);
+  if (Number(text) >= 1000 && index + 1 < COUNT_UNITS.length) {
+    index += 1;
+    text = format(COUNT_UNITS[index]);
+  }
+  return `${text}${COUNT_UNITS[index].unit}`;
+}
+
 function normalizeUsageRange(value, fallback = DEFAULTS.usageRange) {
   return USAGE_RANGES.includes(value) ? value : fallback;
 }
@@ -541,8 +574,8 @@ function usageView(state = {}, range = "1d", metric = "callsCost") {
   const suffix = stale ? "数据过期" : "";
   if (metric === "tokens") {
     const tokenValue = metrics.inputTokens !== null || metrics.outputTokens !== null
-      ? `${displayCount(metrics.inputTokens)}+${displayCount(metrics.outputTokens)}`
-      : displayCount(metrics.totalTokens);
+      ? `${displayTokens(metrics.inputTokens)}+${displayTokens(metrics.outputTokens)}`
+      : displayTokens(metrics.totalTokens);
     return {
       label: `Token · ${rangeLabel}`,
       value: `${tokenValue} Token`,
@@ -553,13 +586,13 @@ function usageView(state = {}, range = "1d", metric = "callsCost") {
   }
   if (metric === "cache") {
     const details = [
-      metrics.cacheCreation5mTokens === null ? "" : `5m ${displayCount(metrics.cacheCreation5mTokens)}`,
-      metrics.cacheCreation1hTokens === null ? "" : `1h ${displayCount(metrics.cacheCreation1hTokens)}`,
+      metrics.cacheCreation5mTokens === null ? "" : `5m ${displayTokens(metrics.cacheCreation5mTokens)}`,
+      metrics.cacheCreation1hTokens === null ? "" : `1h ${displayTokens(metrics.cacheCreation1hTokens)}`,
       suffix,
     ].filter(Boolean).join(" ");
     return {
       label: `缓存 · ${rangeLabel}`,
-      value: `${displayCount(metrics.cacheReadTokens)}读/${displayCount(metrics.cacheCreationTokens)}写`,
+      value: `${displayTokens(metrics.cacheReadTokens)}读/${displayTokens(metrics.cacheCreationTokens)}写`,
       tone: stale ? "stale" : "normal",
       status: details,
       percent: null,
@@ -633,6 +666,7 @@ module.exports = {
   displayMoney,
   displayLimit,
   displayCount,
+  displayTokens,
   normalizeUsageRange,
   normalizeMetric,
   usageDataForRange,

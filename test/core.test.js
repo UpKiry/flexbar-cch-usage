@@ -7,6 +7,7 @@ const {
   compactMoney,
   amount,
   compactAmount,
+  displayTokens,
   aggregateRecentSummary,
   aggregateUsageMetrics,
   normalizeMetric,
@@ -46,6 +47,26 @@ test("formats finite values and safe fallbacks", () => {
 
 test("calculates Shanghai calendar dates deterministically", () => {
   assert.equal(localDate(new Date("2026-09-11T00:00:00.000Z")), "2026-09-11");
+});
+
+test("Token 数量用 K/M/B 缩写，小数值保持精确", () => {
+  assert.equal(displayTokens(null), "-");
+  assert.equal(displayTokens(Number.NaN), "-");
+  assert.equal(displayTokens(0), "0");
+  assert.equal(displayTokens(200), "200");
+  assert.equal(displayTokens(999), "999");
+  assert.equal(displayTokens(1000), "1K");
+  assert.equal(displayTokens(1234), "1.2K");
+  assert.equal(displayTokens(9999), "10K");
+  assert.equal(displayTokens(12345), "12K");
+  assert.equal(displayTokens(999_449), "999K");
+  // 四舍五入进位时升到上一级单位，不出现 "1000K"。
+  assert.equal(displayTokens(999_500), "1M");
+  assert.equal(displayTokens(1_000_000), "1M");
+  assert.equal(displayTokens(1_234_567), "1.2M");
+  assert.equal(displayTokens(12_300_000), "12M");
+  assert.equal(displayTokens(1_234_567_890), "1.2B");
+  assert.equal(displayTokens(2_500_000_000_000), "2.5T");
 });
 
 test("normalizes per-key usage ranges", () => {
@@ -194,6 +215,20 @@ test("未配置时按键显示固定提示，不泄露接口错误", () => {
   assert.equal(view.value, "请配置 CC Hub");
   assert.equal(view.status, "未配置");
   assert.equal(JSON.stringify(view).includes("secret"), false);
+});
+
+test("Token 和缓存按键用缩写单位显示大数", () => {
+  const config = { cchUrl: "https://hub.example", apiKey: "k" };
+  const state = {
+    today: { inputTokens: 1_234_567, outputTokens: 89_012 },
+    summaries: {
+      "7d": { totalCacheReadTokens: 23_400_000, totalCacheCreationTokens: 4_500_000 },
+    },
+  };
+  const tokens = buildView("com.upkiry.flexbarcchusage.usage", state, config, { range: "1d", metric: "tokens" });
+  assert.equal(tokens.value, "1.2M+89K Token");
+  const cache = buildView("com.upkiry.flexbarcchusage.usage", state, config, { range: "7d", metric: "cache" });
+  assert.equal(cache.value, "23M读/4.5M写");
 });
 
 test("单个分片过期只影响使用它的按键", () => {
